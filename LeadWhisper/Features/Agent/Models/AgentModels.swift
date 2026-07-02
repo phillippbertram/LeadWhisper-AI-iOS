@@ -250,7 +250,14 @@ struct AgentTimelineItem: Identifiable, Hashable {
 
 struct ChangeExecutionResult {
     var spokenSummary: String
-    var changedTitles: [String]
+    var changedRecords: [ChangedCRMRecord]
+}
+
+struct ChangedCRMRecord: Identifiable, Hashable, Sendable {
+    var id: UUID
+    var kind: ActivityEntityKind
+    var title: String
+    var canOpen = true
 }
 
 enum AgentDraftError: LocalizedError {

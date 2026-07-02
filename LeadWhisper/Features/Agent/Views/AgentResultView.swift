@@ -45,6 +45,7 @@ struct AgentResultView: View {
                 ProposedChangesView(
                     changes: runResult.draft.proposedChanges,
                     diffs: runResult.diffs,
+                    selectedCount: selectedChangeIDs.count,
                     isSelectable: showsActions,
                     isSelected: { !deselectedChangeIDs.contains($0) },
                     toggleSelection: { id in
@@ -211,14 +212,18 @@ private struct DetectedFactsView: View {
 private struct ProposedChangesView: View {
     let changes: [ProposedChange]
     let diffs: [String: [ProposedChangeDiffField]]
+    let selectedCount: Int
     let isSelectable: Bool
     let isSelected: (String) -> Bool
     let toggleSelection: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Proposed Changes")
-                .font(.headline)
+            ReviewSummaryHeader(
+                proposedCount: changes.count,
+                selectedCount: selectedCount,
+                isSelectable: isSelectable
+            )
             ForEach(changes) { change in
                 ProposedChangeCard(
                     change: change,
@@ -230,6 +235,28 @@ private struct ProposedChangesView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ReviewSummaryHeader: View {
+    let proposedCount: Int
+    let selectedCount: Int
+    let isSelectable: Bool
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("\(proposedCount) \(proposedCount == 1 ? "change" : "changes") proposed")
+                .font(.headline)
+            Spacer(minLength: 8)
+            if isSelectable, proposedCount > 1 {
+                Text("\(selectedCount) selected")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(selectedCount == 0 ? .red : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(.tertiarySystemFill), in: Capsule())
+            }
+        }
     }
 }
 
@@ -293,11 +320,21 @@ private struct ProposedChangeCard: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Text(change.action.rawValue)
-                    .font(.caption2)
-                    .foregroundStyle(isDestructive ? .red : .secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(change.action.displayTitle)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(isDestructive ? .red : .secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    if !isSelected {
+                        Text("Excluded")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color(.tertiarySystemFill), in: Capsule())
+                    }
+                }
             }
 
             ProposedChangeDetails(change: change, diff: diff)
@@ -413,8 +450,13 @@ private struct ChangeDiffRow: View {
                     Text(oldValue)
                         .strikethrough()
                         .foregroundStyle(.secondary)
-                    Text("-> \(field.newValue)")
-                        .fontWeight(.medium)
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Image(systemName: "arrow.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                        Text(field.newValue)
+                            .fontWeight(.medium)
+                    }
                 }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .multilineTextAlignment(.leading)
@@ -455,6 +497,33 @@ private extension DetectedFactKind {
 }
 
 private extension ProposedChangeAction {
+    var displayTitle: String {
+        switch self {
+        case .createContact:
+            "Create contact"
+        case .updateContact:
+            "Update contact"
+        case .createOpportunity:
+            "Create opportunity"
+        case .updateOpportunity:
+            "Update opportunity"
+        case .updateOpportunityStage:
+            "Move opportunity"
+        case .createInteraction:
+            "Add activity"
+        case .createFollowUp:
+            "Create follow-up"
+        case .updateFollowUp:
+            "Update follow-up"
+        case .completeFollowUp:
+            "Complete follow-up"
+        case .archiveFollowUps:
+            "Archive follow-ups"
+        case .deleteContact, .deleteOpportunity, .deleteFollowUp:
+            "Delete record"
+        }
+    }
+
     var systemImage: String {
         switch self {
         case .createContact, .updateContact:

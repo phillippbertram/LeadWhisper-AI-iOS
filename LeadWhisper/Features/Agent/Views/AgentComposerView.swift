@@ -32,6 +32,11 @@ struct AgentComposerView: View {
     @State private var showsPrivacyInfo = false
     @State private var actionError: PresentableError?
     @State private var hasShownEntryAnimation = false
+    private let openChangedRecord: ((ChangedCRMRecord) -> Void)?
+
+    init(openChangedRecord: ((ChangedCRMRecord) -> Void)? = nil) {
+        self.openChangedRecord = openChangedRecord
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -47,6 +52,7 @@ struct AgentComposerView: View {
                         AgentMessageRow(
                             message: message,
                             activeResultID: activeResultID,
+                            openChangedRecord: openChangedRecord,
                             save: saveDraft,
                             cancel: cancelDraft
                         )
@@ -83,6 +89,14 @@ struct AgentComposerView: View {
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
 
+                    if activeReviewResult != nil {
+                        DraftRevisionStatusBar(
+                            isEnabled: !isProcessing,
+                            cancel: cancelActiveDraft
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+
                     AgentInputBar(
                         text: $draftText,
                         isInputFocused: $isInputFocused,
@@ -107,6 +121,7 @@ struct AgentComposerView: View {
                 .offset(y: entryOffset(for: .inputBar))
                 .animation(entryAnimation(delay: 0.12), value: hasShownEntryAnimation)
                 .animation(.snappy(duration: 0.18), value: activeClarificationOptions)
+                .animation(.snappy(duration: 0.18), value: activeResultID)
             }
             .onAppear {
                 refreshSuggestions()
@@ -226,6 +241,10 @@ struct AgentComposerView: View {
     }
 
     private var inputPlaceholder: String {
+        if activeReviewResult != nil {
+            return "Tell me how to revise this draft..."
+        }
+
         guard let activeClarification else {
             return "Tell me what changed with a lead..."
         }
@@ -337,28 +356,37 @@ struct AgentComposerView: View {
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isProcessing else { return }
+        let activeReview = activeReviewResult
 
         if voiceInput.isRecording {
             voiceInput.stopRecording()
         }
 
-        if activeReviewResult != nil {
-            engine.noteDraftCancelled()
-            activeTranscript = ""
-        }
-
         draftText = ""
         dismissKeyboard()
         isVoiceSession = false
-        activeResultID = nil
+        if activeReview == nil {
+            activeResultID = nil
+        }
         messages.append(.user(trimmed))
         activeTranscript = activeTranscript.isEmpty ? trimmed : "\(activeTranscript)\n\(trimmed)"
 
+        let outboundMessage: String
+        let replacedResultID: UUID?
+        if let activeReview {
+            outboundMessage = revisionPrompt(for: activeReview, instruction: trimmed)
+            replacedResultID = activeReview.id
+            activeResultID = nil
+        } else {
+            outboundMessage = trimmed
+            replacedResultID = nil
+        }
+
         analyzeTask?.cancel()
-        analyzeTask = Task { await analyze(message: trimmed) }
+        analyzeTask = Task { await analyze(message: outboundMessage, replacingResultID: replacedResultID) }
     }
 
-    private func analyze(message: String) async {
+    private func analyze(message: String, replacingResultID: UUID? = nil) async {
         AppLog.agent.info("Agent analyze requested messageCharacters=\(message.count, privacy: .public)")
         isProcessing = true
         defer { isProcessing = false }
@@ -376,9 +404,14 @@ struct AgentComposerView: View {
 
         if result.kind == .reply, result.errorMessage == nil {
             let text = result.message.nilIfBlank ?? "Tell me which contact, opportunity, or follow-up you want to change and what should happen next."
+            activeResultID = replacingResultID
             messages.append(.assistant(text, detail: nil, systemImage: "sparkles"))
         } else {
             activeResultID = result.id
+            if let replacingResultID,
+               let index = messages.firstIndex(where: { $0.resultID == replacingResultID }) {
+                messages.remove(at: index)
+            }
             messages.append(.result(result, transcript: activeTranscript))
         }
         AppLog.agent.info("Agent analyze finished kind=\(result.kind.rawValue, privacy: .public) proposedChanges=\(result.draft.proposedChanges.count, privacy: .public) hasError=\(result.errorMessage == nil ? "false" : "true", privacy: .public)")
@@ -409,9 +442,9 @@ struct AgentComposerView: View {
             activeResultID = nil
             activeTranscript = ""
             engine.noteDraftSaved()
-            messages.append(.receipt(result.changedTitles))
+            messages.append(.receipt(result.changedRecords))
             speechOutput.speak(result.spokenSummary)
-            AppLog.agent.info("Agent draft saved changedTitles=\(result.changedTitles.count, privacy: .public)")
+            AppLog.agent.info("Agent draft saved changedRecords=\(result.changedRecords.count, privacy: .public)")
         } catch {
             actionError = PresentableError(error)
             AppLog.agent.error("Agent draft save failed error=\(error.localizedDescription, privacy: .public)")
@@ -425,6 +458,47 @@ struct AgentComposerView: View {
         engine.noteDraftCancelled()
         messages.append(.assistant("Draft cancelled", detail: nil, systemImage: "xmark.circle"))
         AppLog.agent.info("Agent draft cancelled")
+    }
+
+    private func cancelActiveDraft() {
+        guard let activeReviewResult else { return }
+        cancelDraft(activeReviewResult)
+    }
+
+    private func revisionPrompt(for result: AgentRunResult, instruction: String) -> String {
+        """
+        Revise the active review draft using this new user instruction. Return a fresh AgentTurn with the complete revised draft, not just the delta. Keep any proposed changes that are still correct and update, add, or remove only what the instruction changes.
+
+        User revision instruction:
+        \(instruction)
+
+        Active draft summary:
+        \(result.draft.summary)
+
+        Active proposed changes:
+        \(revisionChangeSummary(for: result.draft.proposedChanges))
+        """
+    }
+
+    private func revisionChangeSummary(for changes: [ProposedChange]) -> String {
+        guard !changes.isEmpty else { return "No proposed changes." }
+
+        return changes.enumerated().map { index, change in
+            let fields = [
+                change.contactName.map { "contact=\($0)" },
+                change.company.map { "company=\($0)" },
+                change.opportunityTitle.map { "opportunity=\($0)" },
+                change.stage.map { "stage=\($0)" },
+                change.followUpTitle.map { "followUp=\($0)" },
+                change.dueDateText.map { "due=\($0)" },
+                change.notes.map { "notes=\($0)" }
+            ]
+            .compactMap { $0?.nilIfBlank }
+            .joined(separator: "; ")
+
+            return "\(index + 1). action=\(change.action.rawValue); title=\(change.title); targetID=\(change.targetID ?? "-"); \(fields)"
+        }
+        .joined(separator: "\n")
     }
 
     private func toggleRecording() {
@@ -495,8 +569,8 @@ private struct AgentConversationMessage: Identifiable {
         AgentConversationMessage(content: .result(runResult, transcript: transcript))
     }
 
-    static func receipt(_ changedTitles: [String]) -> AgentConversationMessage {
-        AgentConversationMessage(content: .receipt(changedTitles))
+    static func receipt(_ changedRecords: [ChangedCRMRecord]) -> AgentConversationMessage {
+        AgentConversationMessage(content: .receipt(changedRecords))
     }
 
     var resultID: UUID? {
@@ -511,12 +585,13 @@ private enum AgentMessageContent {
     case assistant(title: String, detail: String?, systemImage: String)
     case user(String)
     case result(AgentRunResult, transcript: String)
-    case receipt([String])
+    case receipt([ChangedCRMRecord])
 }
 
 private struct AgentMessageRow: View {
     let message: AgentConversationMessage
     let activeResultID: UUID?
+    let openChangedRecord: ((ChangedCRMRecord) -> Void)?
     let save: (AgentRunResult, String, Set<String>) -> Void
     let cancel: (AgentRunResult) -> Void
 
@@ -537,8 +612,8 @@ private struct AgentMessageRow: View {
                 cancel: cancel
             )
 
-        case .receipt(let changedTitles):
-            ReceiptBubble(changedTitles: changedTitles)
+        case .receipt(let changedRecords):
+            ReceiptBubble(changedRecords: changedRecords, open: openChangedRecord)
         }
     }
 }
@@ -624,7 +699,8 @@ private struct AgentResultBubble: View {
 }
 
 private struct ReceiptBubble: View {
-    let changedTitles: [String]
+    let changedRecords: [ChangedCRMRecord]
+    let open: ((ChangedCRMRecord) -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -632,18 +708,10 @@ private struct ReceiptBubble: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Saved to your CRM")
                     .font(.subheadline.weight(.semibold))
-                if !changedTitles.isEmpty {
+                if !changedRecords.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(changedTitles.enumerated()), id: \.offset) { _, title in
-                            HStack(alignment: .top, spacing: 6) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.caption)
-                                    .foregroundStyle(.green)
-                                Text(title)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                        ForEach(changedRecords) { record in
+                            ReceiptRecordRow(record: record, open: open)
                         }
                     }
                 }
@@ -652,6 +720,51 @@ private struct ReceiptBubble: View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             Spacer(minLength: 36)
         }
+    }
+}
+
+private struct ReceiptRecordRow: View {
+    let record: ChangedCRMRecord
+    let open: ((ChangedCRMRecord) -> Void)?
+
+    var body: some View {
+        if let open, record.canOpen, record.kind.isOpenableFromAgentReceipt {
+            Button {
+                open(record)
+            } label: {
+                rowContent(actionTitle: record.kind.openActionTitle, showsChevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(record.kind.openActionTitle), \(record.title)")
+        } else {
+            rowContent(actionTitle: record.canOpen ? record.kind.receiptTitle : "Deleted from CRM", showsChevron: false)
+        }
+    }
+
+    private func rowContent(actionTitle: String, showsChevron: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: record.kind.systemImage)
+                .font(.caption)
+                .foregroundStyle(.green)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.title)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(actionTitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 3)
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 
@@ -671,23 +784,89 @@ private struct AgentAvatar: View {
     }
 }
 
+private extension ActivityEntityKind {
+    var isOpenableFromAgentReceipt: Bool {
+        switch self {
+        case .contact, .opportunity, .followUp:
+            true
+        case .interaction, .system:
+            false
+        }
+    }
+
+    var openActionTitle: String {
+        switch self {
+        case .contact:
+            "Open Contact"
+        case .opportunity:
+            "Open Opportunity"
+        case .followUp:
+            "Open Follow-up"
+        case .interaction:
+            "Activity saved"
+        case .system:
+            "Saved"
+        }
+    }
+
+    var receiptTitle: String {
+        switch self {
+        case .contact:
+            "Contact saved"
+        case .opportunity:
+            "Opportunity saved"
+        case .followUp:
+            "Follow-up saved"
+        case .interaction:
+            "Activity saved"
+        case .system:
+            "Saved"
+        }
+    }
+}
+
 private struct ProcessingBubble: View {
     var activity: String?
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             AgentAvatar(systemImage: "brain")
-            HStack(spacing: 7) {
+            HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
+                Text(friendlyActivity)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 TypingDots()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .accessibilityLabel("LeadWhisper is thinking")
+            .accessibilityValue(friendlyActivity)
             Spacer(minLength: 36)
         }
+    }
+
+    private var friendlyActivity: String {
+        guard let activity = activity?.nilIfBlank else {
+            return "Preparing a review draft..."
+        }
+
+        if activity.hasPrefix("findContacts") {
+            return "Checking matching contacts..."
+        }
+        if activity.hasPrefix("findOpportunities") {
+            return "Checking pipeline..."
+        }
+        if activity.hasPrefix("findFollowUps") {
+            return "Checking follow-ups..."
+        }
+        if activity.hasPrefix("getPipelineSummary") {
+            return "Reading your CRM summary..."
+        }
+        return "Preparing a review draft..."
     }
 }
 
@@ -802,6 +981,40 @@ private struct ClarificationActionBar: View {
             return "chart.line.uptrend.xyaxis"
         }
         return "person.crop.circle"
+    }
+}
+
+private struct DraftRevisionStatusBar: View {
+    let isEnabled: Bool
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label("Editing proposed draft", systemImage: "slider.horizontal.3")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.blue)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+            Spacer(minLength: 8)
+            Button {
+                cancel()
+            } label: {
+                Label("Cancel draft", systemImage: "xmark.circle")
+                    .font(.footnote.weight(.semibold))
+                    .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .disabled(!isEnabled)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(.blue.opacity(0.16))
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
