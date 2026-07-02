@@ -1,37 +1,56 @@
 import Foundation
 import FoundationModels
 
-@Generable(description: "CRM change draft.")
-struct AgentDraft: Sendable {
-    @Guide(description: "Short request summary.")
-    var summary: String
+@Generable
+enum AgentTurnKind: String, Sendable, Hashable {
+    case reply
+    case clarify
+    case propose
+}
 
-    @Guide(description: "Detected facts.")
-    var detectedFacts: [DetectedFact]
+@Generable
+struct AgentTurn: Sendable {
+    @Guide(description: "One or two short sentences.")
+    var thought: String
 
-    @Guide(description: "Planned CRM changes.")
-    var proposedChanges: [ProposedChange]
+    var kind: AgentTurnKind
 
-    @Guide(description: "Question when ambiguous; nil when safe.")
+    @Guide(description: "Short user-visible message.")
+    var message: String
+
     var clarification: ClarificationPrompt?
 
-    @Guide(description: "Brief confirmation after save.")
+    @Guide(.maximumCount(6))
+    var detectedFacts: [DetectedFact]
+
+    @Guide(.maximumCount(6))
+    var proposedChanges: [ProposedChange]
+
+    var spokenConfirmation: String?
+}
+
+/// Reviewable proposal payload shown on result cards and applied by
+/// `ChangeExecutor` after the user confirms. `AgentTurn` is the model wire
+/// format; this struct is assembled from a turn or the demo parser.
+struct AgentDraft: Sendable {
+    var summary: String
+    var detectedFacts: [DetectedFact]
+    var proposedChanges: [ProposedChange]
+    var clarification: ClarificationPrompt?
     var spokenConfirmation: String
 }
 
-@Generable(description: "Extracted fact.")
+@Generable
 struct DetectedFact: Sendable, Hashable {
-    @Guide(description: "Kind of extracted CRM fact.")
     var kind: DetectedFactKind
 
-    @Guide(description: "Human value.")
     var value: String
 
     @Guide(description: "Short source or reason.")
     var detail: String
 }
 
-@Generable(description: "Kind of extracted CRM fact.")
+@Generable
 enum DetectedFactKind: String, Sendable, Hashable {
     case contact
     case company
@@ -44,17 +63,15 @@ enum DetectedFactKind: String, Sendable, Hashable {
     case startDate
 }
 
-@Generable(description: "Proposed CRM mutation.")
+@Generable
 struct ProposedChange: Sendable, Identifiable {
     var id: String
 
-    @Guide(description: "Allowed CRM mutation action.")
     var action: ProposedChangeAction
 
-    @Guide(description: "Card title.")
     var title: String
 
-    @Guide(description: "Existing local UUID if found.")
+    @Guide(description: "Existing local UUID.")
     var targetID: String?
 
     var contactName: String?
@@ -75,10 +92,11 @@ struct ProposedChange: Sendable, Identifiable {
     @Guide(description: "open, done, archived.")
     var followUpState: String?
     var notes: String?
+    @Guide(.maximumCount(5))
     var tags: [String]
 }
 
-@Generable(description: "Allowed CRM mutation action.")
+@Generable
 enum ProposedChangeAction: String, CaseIterable, Sendable, Hashable {
     case createContact
     case updateContact
@@ -95,22 +113,83 @@ enum ProposedChangeAction: String, CaseIterable, Sendable, Hashable {
     case deleteFollowUp
 }
 
-@Generable(description: "Clarification question.")
+@Generable
 struct ClarificationPrompt: Sendable {
-    @Guide(description: "Question.")
     var question: String
 
-    @Guide(description: "Concrete options.")
+    @Guide(.minimumCount(2), .maximumCount(4))
     var options: [String]
+
+    var allowsFreeText: Bool?
+
+    var placeholder: String?
+
+    init(question: String, options: [String] = [], allowsFreeText: Bool? = nil, placeholder: String? = nil) {
+        self.question = question
+        self.options = options
+        self.allowsFreeText = allowsFreeText
+        self.placeholder = placeholder
+    }
 }
 
 struct AgentRunResult: Identifiable {
     let id = UUID()
+    var kind: AgentTurnKind
+    var message: String
+    var thought: String
     var draft: AgentDraft
     var timeline: [AgentTimelineItem]
-    var usedMockParser: Bool
     var availabilityMessage: String
     var errorMessage: String?
+    /// Old -> new field diffs per `ProposedChange.id`, resolved against the
+    /// current local records when the result is shown for review.
+    var diffs: [String: [ProposedChangeDiffField]] = [:]
+}
+
+struct ProposedChangeDiffField: Identifiable, Hashable {
+    let id = UUID()
+    var title: String
+    /// Current value of the targeted record; nil when unchanged or new.
+    var oldValue: String?
+    var newValue: String
+}
+
+/// UserDefaults keys for agent UI preferences.
+enum AgentSettings {
+    static let debugModeKey = "agentDebugModeEnabled"
+}
+
+struct AgentContextWindowUsage: Sendable, Hashable {
+    var usedTokens: Int
+    var maximumTokens: Int
+    var inputTokens: Int
+    var memoryTokens: Int
+    var responseReserveTokens: Int
+    var toolScope: String
+
+    var fraction: Double {
+        guard maximumTokens > 0 else { return 0 }
+        return min(1, max(0, Double(usedTokens) / Double(maximumTokens)))
+    }
+
+    var percentage: Int {
+        Int((fraction * 100).rounded())
+    }
+
+    var accessibilityValue: String {
+        "Estimated \(percentage) percent, \(usedTokens) of \(maximumTokens) tokens."
+    }
+
+    static func empty(maximumTokens: Int) -> AgentContextWindowUsage {
+        AgentContextWindowUsage(
+            usedTokens: 0,
+            maximumTokens: maximumTokens,
+            inputTokens: 0,
+            memoryTokens: 0,
+            responseReserveTokens: 0,
+            toolScope: "full"
+        )
+    }
 }
 
 struct AgentTimelineItem: Identifiable, Hashable {
@@ -142,6 +221,30 @@ enum AgentDraftError: LocalizedError {
         case .unsafeDestructiveChange(let reason):
             reason
         }
+    }
+}
+
+extension AgentTurn {
+    /// Trusts the generated content over the declared kind so a mislabeled
+    /// turn still renders safely.
+    var resolvedKind: AgentTurnKind {
+        if clarification != nil {
+            return .clarify
+        }
+        if !proposedChanges.isEmpty {
+            return .propose
+        }
+        return .reply
+    }
+
+    var draft: AgentDraft {
+        AgentDraft(
+            summary: message,
+            detectedFacts: detectedFacts,
+            proposedChanges: proposedChanges,
+            clarification: clarification,
+            spokenConfirmation: spokenConfirmation ?? ""
+        )
     }
 }
 

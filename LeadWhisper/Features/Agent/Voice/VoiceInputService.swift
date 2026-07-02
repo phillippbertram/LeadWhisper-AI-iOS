@@ -33,28 +33,14 @@ final class VoiceInputService {
 
     var isRecording: Bool { state == .recording }
 
-    // The audio engine opens XPC connections to system services; allocating it
-    // lazily keeps view construction from stalling the main thread.
     @ObservationIgnored
-    private lazy var audioEngine = AVAudioEngine()
+    private var recordingSession: SpeechRecordingSession?
     @ObservationIgnored
-    private var analyzer: SpeechAnalyzer?
-    @ObservationIgnored
-    private var transcriber: SpeechTranscriber?
-    @ObservationIgnored
-    private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
-    @ObservationIgnored
-    private var analysisTask: Task<Void, Never>?
-    @ObservationIgnored
-    private var resultTask: Task<Void, Never>?
-    @ObservationIgnored
-    private var transcriptionSegments: [TranscriptionSegment] = []
-    private var hasInstalledTap = false
+    private var eventTask: Task<Void, Never>?
 
-    /// True while any audio or recognition resources are live, without touching
-    /// the lazy audio engine (so an early stop never allocates it).
+    /// True while any audio or recognition resources are live.
     private var hasActiveAudioWork: Bool {
-        state != .idle || inputContinuation != nil || analysisTask != nil || resultTask != nil || hasInstalledTap
+        state != .idle || recordingSession != nil || eventTask != nil
     }
 
     init(recordingCapability: VoiceRecordingCapability? = nil) {
@@ -134,7 +120,12 @@ final class VoiceInputService {
             try await prepareSpeechAssets(for: transcriber)
             try await Self.activateAudioSession()
             try validateAudioRoute()
-            try await startAudioAnalysis(transcriber: transcriber)
+            let session = SpeechRecordingSession(transcriber: transcriber)
+            let events = try await session.start()
+            recordingSession = session
+            eventTask = Task { [weak self] in
+                await self?.consumeRecordingEvents(events)
+            }
             state = .recording
             didStartRecording = true
             statusMessage = "Listening..."
@@ -145,33 +136,33 @@ final class VoiceInputService {
             if Self.isUnavailableAudioError(error) {
                 recordingCapability = .unavailable(statusMessage)
             }
-            stopRecording()
+            stopRecording(finalStatus: statusMessage)
         }
     }
 
     func stopRecording() {
-        guard hasActiveAudioWork else { return }
-        if audioEngine.isRunning {
-            audioEngine.stop()
+        stopRecording(finalStatus: nil)
+    }
+
+    private func stopRecording(finalStatus: String?, cancelEventTask: Bool = true) {
+        guard hasActiveAudioWork else {
+            if let finalStatus {
+                statusMessage = finalStatus
+            }
+            state = .idle
+            return
         }
-        if hasInstalledTap {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            hasInstalledTap = false
+
+        let sessionToStop = recordingSession
+        recordingSession = nil
+        if cancelEventTask {
+            eventTask?.cancel()
         }
-        inputContinuation?.finish()
-        inputContinuation = nil
-        analysisTask?.cancel()
-        resultTask?.cancel()
-        analysisTask = nil
-        resultTask = nil
-        transcriber = nil
-        let analyzerToCancel = analyzer
-        analyzer = nil
-        transcriptionSegments = []
+        eventTask = nil
         state = .idle
-        statusMessage = transcript.isEmpty ? recordingCapability.message : "Transcript captured"
+        statusMessage = finalStatus ?? (transcript.isEmpty ? recordingCapability.message : "Transcript captured")
         Task {
-            await analyzerToCancel?.cancelAndFinishNow()
+            await sessionToStop?.stop()
             await Self.deactivateAudioSession()
         }
         AppLog.voice.info("Voice recording stopped transcriptCharacters=\(self.transcript.count, privacy: .public)")
@@ -180,9 +171,46 @@ final class VoiceInputService {
     func reset() {
         stopRecording()
         transcript = ""
-        transcriptionSegments = []
         statusMessage = recordingCapability.message
         AppLog.voice.debug("Voice transcript reset")
+    }
+
+    private func consumeRecordingEvents(_ events: AsyncThrowingStream<VoiceRecordingEvent, any Error>) async {
+        do {
+            for try await event in events {
+                handle(event)
+            }
+            if state == .recording {
+                stopRecording(finalStatus: transcript.isEmpty ? recordingCapability.message : "Transcript captured", cancelEventTask: false)
+            }
+        } catch is CancellationError {
+            AppLog.voice.debug("Voice recording event task cancelled")
+        } catch {
+            handleRecordingError(error)
+        }
+    }
+
+    private func handle(_ event: VoiceRecordingEvent) {
+        switch event {
+        case .status(let message):
+            statusMessage = message
+        case .transcript(let transcript):
+            self.transcript = transcript
+        case .finished:
+            if state == .recording {
+                stopRecording(finalStatus: transcript.isEmpty ? recordingCapability.message : "Transcript captured", cancelEventTask: false)
+            }
+        }
+    }
+
+    private func handleRecordingError(_ error: Error) {
+        let message = Self.friendlyMessage(for: error)
+        statusMessage = message
+        AppLog.voice.error("Voice recording stream failed error=\(error.localizedDescription, privacy: .public)")
+        if Self.isUnavailableAudioError(error) {
+            recordingCapability = .unavailable(message)
+        }
+        stopRecording(finalStatus: message, cancelEventTask: false)
     }
 
     func refreshRecordingCapability() {
@@ -312,32 +340,71 @@ final class VoiceInputService {
         }
     }
 
-    private func startAudioAnalysis(transcriber: SpeechTranscriber) async throws {
-        analysisTask?.cancel()
-        resultTask?.cancel()
-        analysisTask = nil
-        resultTask = nil
-        transcriptionSegments = []
+}
 
+private enum VoiceRecordingEvent: Sendable {
+    case status(String)
+    case transcript(String)
+    case finished
+}
+
+@MainActor
+private final class SpeechRecordingSession {
+    private let audioEngine = AVAudioEngine()
+    private let analyzer: SpeechAnalyzer
+    private let transcriber: SpeechTranscriber
+
+    private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
+    private var eventContinuation: AsyncThrowingStream<VoiceRecordingEvent, any Error>.Continuation?
+    private var analysisTask: Task<Void, Never>?
+    private var resultTask: Task<Void, Never>?
+    private var transcriptionSegments: [TranscriptionSegment] = []
+    private var hasInstalledTap = false
+    private var hasFinished = false
+
+    init(transcriber: SpeechTranscriber) {
+        self.transcriber = transcriber
+        self.analyzer = SpeechAnalyzer(modules: [transcriber])
+    }
+
+    func start() async throws -> AsyncThrowingStream<VoiceRecordingEvent, any Error> {
         let inputNode = audioEngine.inputNode
-        let naturalFormat = inputNode.outputFormat(forBus: 0)
-        let format = await SpeechAnalyzer.bestAvailableAudioFormat(
-            compatibleWith: [transcriber],
-            considering: naturalFormat
-        ) ?? naturalFormat
-
-        guard format.sampleRate > 0, format.channelCount > 0 else {
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw VoiceInputError.invalidInputFormat
         }
 
-        let analyzer = SpeechAnalyzer(modules: [transcriber])
-        try await analyzer.prepareToAnalyze(in: format)
-        self.analyzer = analyzer
-        self.transcriber = transcriber
+        let eventPipe = AsyncThrowingStream<VoiceRecordingEvent, any Error>.makeStream(
+            of: VoiceRecordingEvent.self,
+            throwing: (any Error).self
+        )
+        eventContinuation = eventPipe.continuation
 
-        let (inputStream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
-        inputContinuation = continuation
+        do {
+            try await analyzer.prepareToAnalyze(in: inputFormat)
+            let inputPipe = AsyncStream.makeStream(of: AnalyzerInput.self)
+            inputContinuation = inputPipe.continuation
+            startResultTask()
+            startAnalysisTask(inputStream: inputPipe.stream)
+            installTap(on: inputNode, format: inputFormat, continuation: inputPipe.continuation)
+            audioEngine.prepare()
+            try audioEngine.start()
+            eventContinuation?.yield(.status("Listening..."))
+            AppLog.voice.debug("Audio engine started inputSampleRate=\(inputFormat.sampleRate, privacy: .public) inputChannels=\(inputFormat.channelCount, privacy: .public)")
+            return eventPipe.stream
+        } catch {
+            finish(throwing: error)
+            await analyzer.cancelAndFinishNow()
+            throw error
+        }
+    }
 
+    func stop() async {
+        finish(throwing: nil)
+        await analyzer.cancelAndFinishNow()
+    }
+
+    private func startResultTask() {
         resultTask = Task { [weak self, transcriber] in
             do {
                 for try await result in transcriber.results {
@@ -345,48 +412,51 @@ final class VoiceInputService {
                         self?.applyTranscriptionResult(result)
                     }
                 }
+            } catch is CancellationError {
+                AppLog.voice.debug("Speech transcription results task cancelled")
             } catch {
                 await MainActor.run {
-                    guard let self else { return }
-                    self.statusMessage = Self.friendlyMessage(for: error)
+                    self?.finish(throwing: error)
                     AppLog.voice.error("Speech transcription results failed error=\(error.localizedDescription, privacy: .public)")
-                    self.stopRecording()
                 }
             }
         }
+    }
 
+    private func startAnalysisTask(inputStream: AsyncStream<AnalyzerInput>) {
         analysisTask = Task { [weak self, analyzer] in
             do {
                 _ = try await analyzer.analyzeSequence(inputStream)
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
+                await MainActor.run {
+                    self?.finish(throwing: nil)
+                }
             } catch is CancellationError {
                 AppLog.voice.debug("Speech analysis task cancelled")
             } catch {
                 await MainActor.run {
-                    guard let self else { return }
-                    self.statusMessage = Self.friendlyMessage(for: error)
+                    self?.finish(throwing: error)
                     AppLog.voice.error("Speech analysis failed error=\(error.localizedDescription, privacy: .public)")
-                    self.stopRecording()
                 }
             }
         }
+    }
 
+    private func installTap(
+        on inputNode: AVAudioInputNode,
+        format inputFormat: AVAudioFormat,
+        continuation: AsyncStream<AnalyzerInput>.Continuation
+    ) {
         if hasInstalledTap {
             inputNode.removeTap(onBus: 0)
             hasInstalledTap = false
         }
-        // The tap block runs on the realtime audio thread; copy the buffer before
-        // handing it to the async analysis stream so later engine reuse cannot
-        // mutate memory still being analyzed.
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
-            let analysisBuffer = Self.copyBuffer(buffer) ?? buffer
-            continuation.yield(AnalyzerInput(buffer: analysisBuffer))
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable buffer, _ in
+            guard let copiedBuffer = Self.copyBuffer(buffer) else { return }
+            continuation.yield(AnalyzerInput(buffer: copiedBuffer))
         }
         hasInstalledTap = true
-
-        audioEngine.prepare()
-        try audioEngine.start()
-        AppLog.voice.debug("Audio engine started sampleRate=\(format.sampleRate, privacy: .public) channels=\(format.channelCount, privacy: .public)")
     }
 
     private func applyTranscriptionResult(_ result: SpeechTranscriber.Result) {
@@ -402,8 +472,37 @@ final class VoiceInputService {
         transcriptionSegments.sort {
             CMTimeCompare($0.range.start, $1.range.start) < 0
         }
-        transcript = transcriptionSegments.map(\.text).joined(separator: " ")
-        AppLog.voice.debug("Speech transcription updated segments=\(self.transcriptionSegments.count, privacy: .public) characters=\(self.transcript.count, privacy: .public)")
+        let transcript = transcriptionSegments.map(\.text).joined(separator: " ")
+        eventContinuation?.yield(.transcript(transcript))
+        AppLog.voice.debug("Speech transcription updated segments=\(self.transcriptionSegments.count, privacy: .public) characters=\(transcript.count, privacy: .public)")
+    }
+
+    private func finish(throwing error: Error?) {
+        guard !hasFinished else { return }
+        hasFinished = true
+
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        if hasInstalledTap {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            hasInstalledTap = false
+        }
+
+        inputContinuation?.finish()
+        inputContinuation = nil
+        analysisTask?.cancel()
+        resultTask?.cancel()
+        analysisTask = nil
+        resultTask = nil
+
+        if let error {
+            eventContinuation?.finish(throwing: error)
+        } else {
+            eventContinuation?.yield(.finished)
+            eventContinuation?.finish()
+        }
+        eventContinuation = nil
     }
 
     private nonisolated static func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {

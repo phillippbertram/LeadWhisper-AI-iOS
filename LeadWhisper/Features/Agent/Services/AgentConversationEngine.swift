@@ -1,0 +1,793 @@
+import Foundation
+import FoundationModels
+import Observation
+import OSLog
+
+/// Runs the agent chat loop on one persistent Foundation Models session so the
+/// model keeps its own follow-up questions, answers, and tool results across
+/// turns. Each turn follows the ReAct pattern: the model records a thought,
+/// acts through read-only lookup tools, reads the observations, and finishes
+/// with reply, clarify, or propose. The engine only works with real local CRM
+/// data and never applies changes itself.
+@MainActor
+@Observable
+final class AgentConversationEngine {
+    /// Loop guards in the spirit of LangChain's AgentExecutor: bound the
+    /// actions per turn and stop endless question rounds with a forced final
+    /// answer. Context-window recovery is additionally bounded to one retry.
+    private enum Limits {
+        static let toolCallsPerTurn = 6
+        static let consecutiveClarifications = 3
+        static let turnTimeoutSeconds = 20
+        static let userContextLines = 8
+        static let responseTokens = 900
+    }
+
+    /// Label for the lookup the model is running right now, shown live in the
+    /// processing bubble while a turn is in flight.
+    private(set) var currentActivity: String?
+    private(set) var contextWindowUsage: AgentContextWindowUsage
+
+    private let model = SystemLanguageModel.default
+    private let toolDataSource: AgentToolDataSource
+    @ObservationIgnored private var session: LanguageModelSession?
+    @ObservationIgnored private var activeToolScope: AgentToolScope?
+    @ObservationIgnored private var activeSessionTokens = 0
+    @ObservationIgnored private var contextMemory = AgentContextMemory()
+    @ObservationIgnored private var pendingOutcomeNote: String?
+    @ObservationIgnored private var guidedWorkflow: AgentGuidedWorkflow?
+    @ObservationIgnored private var userContext = ""
+    @ObservationIgnored private var toolCallsThisTurn = 0
+    @ObservationIgnored private var toolCallCounts: [String: Int] = [:]
+    @ObservationIgnored private var consecutiveClarifications = 0
+
+    init(toolDataSource: AgentToolDataSource) {
+        self.toolDataSource = toolDataSource
+        contextWindowUsage = AgentContextWindowUsage.empty(maximumTokens: model.contextSize)
+    }
+
+    var availabilityMessage: String {
+        Self.availabilityMessage(for: model.availability)
+    }
+
+    func contextWindowUsage(for draftText: String) -> AgentContextWindowUsage {
+        _ = contextWindowUsage
+        return estimatedContextWindowUsage(for: draftText)
+    }
+
+    /// Warms the shared on-device model ahead of the first request. Call this
+    /// when the agent UI appears so assets are loaded before the user submits.
+    func prewarm() {
+        guard model.isAvailable else { return }
+        ensureSession(toolScope: .full).prewarm()
+        AppLog.agent.debug("SystemLanguageModel prewarm requested at UI appear")
+    }
+
+    /// Drops the session and all conversation state for a fresh chat.
+    func reset() {
+        session = nil
+        activeToolScope = nil
+        contextMemory.reset()
+        activeSessionTokens = 0
+        pendingOutcomeNote = nil
+        guidedWorkflow = nil
+        userContext = ""
+        toolCallsThisTurn = 0
+        toolCallCounts = [:]
+        consecutiveClarifications = 0
+        updateContextWindowUsage()
+        AppLog.agent.debug("Agent conversation engine reset")
+    }
+
+    /// Grounds the next turn: the model only proposed changes, so it needs to
+    /// hear whether the user actually saved them.
+    func noteDraftSaved() {
+        pendingOutcomeNote = "The user saved the proposed changes."
+        contextMemory.recordOutcome(.saved)
+        consecutiveClarifications = 0
+        refreshSession(reason: "draftSaved")
+        updateContextWindowUsage()
+    }
+
+    func noteDraftCancelled() {
+        pendingOutcomeNote = "The user cancelled the proposed changes."
+        contextMemory.recordOutcome(.cancelled)
+        consecutiveClarifications = 0
+        refreshSession(reason: "draftCancelled")
+        updateContextWindowUsage()
+    }
+
+    func send(_ message: String) async -> AgentRunResult {
+        AppLog.agent.info("Agent turn requested messageCharacters=\(message.count, privacy: .public)")
+        currentActivity = nil
+        toolCallsThisTurn = 0
+        toolCallCounts = [:]
+        updateContextWindowUsage(for: message)
+        defer { currentActivity = nil }
+
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            appendUserContext(trimmed)
+        }
+
+        let snapshot = await localSnapshot()
+        if var workflow = guidedWorkflow {
+            let response = workflow.advance(trimmed, snapshot: snapshot, availabilityMessage: availabilityMessage)
+            guidedWorkflow = response.workflow
+            return finalize(response.result, snapshot: snapshot, userMessage: trimmed)
+        }
+
+        if let response = AgentGuidedWorkflow.start(message: trimmed, snapshot: snapshot, availabilityMessage: availabilityMessage) {
+            guidedWorkflow = response.workflow
+            return finalize(response.result, snapshot: snapshot, userMessage: trimmed)
+        }
+
+        guard model.isAvailable else {
+            return unavailableResult()
+        }
+
+        let toolScope = AgentToolScope.infer(from: trimmed)
+        do {
+            let result = try await respondWithTimeout(to: prompt(for: trimmed), condensed: false, toolScope: toolScope)
+            return finalize(result, snapshot: snapshot, userMessage: trimmed)
+        } catch {
+            if Self.isToolBudgetError(error) {
+                return toolBudgetResult()
+            }
+            if error is AgentTurnTimeout {
+                session = nil
+                return timeoutResult()
+            }
+            guard Self.isContextWindowError(error) else {
+                return failureResult(for: error, exceededContext: false)
+            }
+
+            // The on-device context window is small. Drop the full transcript
+            // and retry once in a fresh session so long conversations recover.
+            AppLog.agent.info("Agent context window exceeded; condensing conversation")
+            refreshSession(reason: "contextOverflow")
+            do {
+                let result = try await respondWithTimeout(to: condensedPrompt(for: trimmed), condensed: true, toolScope: toolScope)
+                return finalize(result, snapshot: snapshot, userMessage: trimmed)
+            } catch {
+                if Self.isToolBudgetError(error) {
+                    return toolBudgetResult()
+                }
+                if error is AgentTurnTimeout {
+                    session = nil
+                    return timeoutResult()
+                }
+                return failureResult(for: error, exceededContext: Self.isContextWindowError(error))
+            }
+        }
+    }
+
+    private func appendUserContext(_ message: String) {
+        let lines = (userContext.split(separator: "\n").map(String.init) + [message])
+            .suffix(Limits.userContextLines)
+        userContext = lines.joined(separator: "\n")
+    }
+
+    private func finalize(_ result: AgentRunResult, snapshot: CRMDataSnapshot, userMessage: String) -> AgentRunResult {
+        let validated = AgentDraftValidator.validate(
+            result,
+            userContext: userContext,
+            snapshot: snapshot,
+            availabilityMessage: availabilityMessage
+        )
+        if !userMessage.isEmpty {
+            contextMemory.recordUserMessage(userMessage)
+        }
+        contextMemory.record(validated)
+
+        if validated.kind == .propose {
+            refreshSession(reason: "draftPrepared")
+        } else if contextMemory.shouldRefreshSession {
+            refreshSession(reason: "rollingWindow")
+        }
+
+        updateContextWindowUsage()
+        return validated
+    }
+
+    private func localSnapshot() async -> CRMDataSnapshot {
+        do {
+            return try await toolDataSource.snapshot()
+        } catch {
+            AppLog.agent.error("Agent local snapshot failed error=\(error.localizedDescription, privacy: .public)")
+            return CRMDataSnapshot(contacts: [], opportunities: [], followUps: [])
+        }
+    }
+
+    private func respondWithTimeout(to prompt: String, condensed: Bool, toolScope: AgentToolScope) async throws -> AgentRunResult {
+        try await withThrowingTaskGroup(of: AgentRunResult.self) { group in
+            group.addTask {
+                let responseTask = Task { @MainActor in
+                    try await self.respond(to: prompt, condensed: condensed, toolScope: toolScope)
+                }
+                return try await responseTask.value
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(Limits.turnTimeoutSeconds))
+                throw AgentTurnTimeout()
+            }
+
+            guard let result = try await group.next() else {
+                throw AgentTurnTimeout()
+            }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func respond(to prompt: String, condensed: Bool, toolScope: AgentToolScope) async throws -> AgentRunResult {
+        let session = ensureSession(toolScope: toolScope)
+        logContextBudget(prompt: prompt, toolScope: toolScope, condensed: condensed)
+
+        // Greedy sampling makes extraction deterministic; temperature has no
+        // effect under greedy, so it is intentionally omitted.
+        let response = try await session.respond(
+            to: prompt,
+            generating: AgentTurn.self,
+            includeSchemaInPrompt: false,
+            options: GenerationOptions(sampling: .greedy, maximumResponseTokens: Limits.responseTokens)
+        )
+
+        pendingOutcomeNote = nil
+        var turn = response.content
+        var kind = turn.resolvedKind
+        var timeline = timeline(from: response.transcriptEntries, thought: turn.thought, condensed: condensed)
+        activeSessionTokens += Self.roughTokenCount(prompt) +
+            Self.roughTokenCount(turn.message) +
+            Self.roughTokenCount(turn.thought) +
+            toolCallsThisTurn * 80
+
+        if kind == .clarify {
+            consecutiveClarifications += 1
+            if consecutiveClarifications > Limits.consecutiveClarifications {
+                // Forced final answer past the cap so question rounds converge.
+                let question = turn.clarification?.question.nilIfBlank
+                turn.clarification = nil
+                turn.proposedChanges = []
+                kind = .reply
+                turn.message = [
+                    turn.message.nilIfBlank,
+                    question,
+                    "I have asked a few questions already - send everything in one message and I will draft it, or make the change manually in the app."
+                ]
+                .compactMap(\.self)
+                .joined(separator: " ")
+                timeline.append(AgentTimelineItem(title: "Clarification limit reached", detail: "Stopped the question round after \(Limits.consecutiveClarifications) consecutive clarifications.", systemImage: "stop.circle"))
+                AppLog.agent.info("Agent clarification limit reached; forced final reply")
+            }
+        } else {
+            consecutiveClarifications = 0
+        }
+
+        AppLog.agent.info("Agent turn generated kind=\(kind.rawValue, privacy: .public) proposedChanges=\(turn.proposedChanges.count, privacy: .public) facts=\(turn.detectedFacts.count, privacy: .public) toolCalls=\(self.toolCallsThisTurn, privacy: .public)")
+        return AgentRunResult(
+            kind: kind,
+            message: turn.message,
+            thought: turn.thought,
+            draft: turn.draft,
+            timeline: timeline,
+            availabilityMessage: availabilityMessage,
+            errorMessage: nil
+        )
+    }
+
+    private func ensureSession(toolScope: AgentToolScope) -> LanguageModelSession {
+        if let session, activeToolScope == toolScope {
+            return session
+        }
+
+        let reporting = reportingDataSource()
+        let tools = toolScope.tools(dataSource: reporting)
+        let instructions = Self.instructions(toolScope: toolScope)
+        let session = LanguageModelSession(model: model, tools: tools, instructions: instructions)
+        self.session = session
+        activeToolScope = toolScope
+        activeSessionTokens = Self.roughTokenCount(instructions) + toolScope.estimatedToolDefinitionTokens
+        updateContextWindowUsage()
+        AppLog.agent.debug("Agent conversation session created scope=\(toolScope.rawValue, privacy: .public) tools=\(tools.count, privacy: .public)")
+        return session
+    }
+
+    /// Wraps the lookup data source so the UI can show which lookup the model
+    /// is running and so the per-turn tool budget is enforced in one place.
+    private func reportingDataSource() -> AgentToolDataSource {
+        let base = toolDataSource
+        return AgentToolDataSource(
+            contacts: { query, limit in
+                try await self.consumeToolBudget(activity: "findContacts \(query)")
+                return try await base.contacts(query, limit)
+            },
+            opportunities: { query, limit in
+                try await self.consumeToolBudget(activity: "findOpportunities \(query)")
+                return try await base.opportunities(query, limit)
+            },
+            followUps: { query, limit in
+                try await self.consumeToolBudget(activity: "findFollowUps \(query)")
+                return try await base.followUps(query, limit)
+            },
+            snapshot: {
+                try await self.consumeToolBudget(activity: "getPipelineSummary")
+                return try await base.snapshot()
+            }
+        )
+    }
+
+    private func consumeToolBudget(activity: String) throws {
+        toolCallsThisTurn += 1
+        let key = activity.searchKey
+        let count = (toolCallCounts[key] ?? 0) + 1
+        toolCallCounts[key] = count
+
+        guard count <= 1 else {
+            AppLog.agent.warning("Agent repeated tool call blocked activity=\(activity, privacy: .private) calls=\(self.toolCallsThisTurn, privacy: .public)")
+            throw AgentToolBudgetExceeded(reason: "Repeated local lookup blocked.")
+        }
+
+        guard toolCallsThisTurn <= Limits.toolCallsPerTurn else {
+            AppLog.agent.warning("Agent tool budget exhausted calls=\(self.toolCallsThisTurn, privacy: .public)")
+            throw AgentToolBudgetExceeded(reason: "Local lookup budget exhausted.")
+        }
+        currentActivity = activity
+    }
+
+    private func refreshSession(reason: String) {
+        session = nil
+        activeToolScope = nil
+        activeSessionTokens = 0
+        contextMemory.markSessionRefreshed()
+        AppLog.agent.debug("Agent conversation session refreshed reason=\(reason, privacy: .public) memoryTokens=\(self.contextMemory.estimatedTokenCount, privacy: .public)")
+    }
+
+    private func updateContextWindowUsage(for draftText: String = "") {
+        contextWindowUsage = estimatedContextWindowUsage(for: draftText)
+    }
+
+    private func estimatedContextWindowUsage(for draftText: String) -> AgentContextWindowUsage {
+        let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolScope = activeToolScope ?? AgentToolScope.infer(from: trimmed)
+        let instructionsTokens = Self.roughTokenCount(Self.instructions(toolScope: toolScope)) + toolScope.estimatedToolDefinitionTokens
+        let sessionTokens = activeToolScope == toolScope && activeSessionTokens > 0 ? activeSessionTokens : instructionsTokens
+        let inputTokens = Self.roughTokenCount(prompt(for: trimmed))
+        let usedTokens = min(model.contextSize, sessionTokens + inputTokens + Limits.responseTokens)
+
+        return AgentContextWindowUsage(
+            usedTokens: usedTokens,
+            maximumTokens: model.contextSize,
+            inputTokens: inputTokens,
+            memoryTokens: contextMemory.estimatedTokenCount,
+            responseReserveTokens: Limits.responseTokens,
+            toolScope: toolScope.rawValue
+        )
+    }
+
+    private func logContextBudget(prompt: String, toolScope: AgentToolScope, condensed: Bool) {
+        let instructions = Self.instructions(toolScope: toolScope)
+        AppLog.agent.debug("Agent context budget contextSize=\(self.model.contextSize, privacy: .public) instructionsTokens~\(Self.roughTokenCount(instructions), privacy: .public) promptTokens~\(Self.roughTokenCount(prompt), privacy: .public) memoryTokens~\(self.contextMemory.estimatedTokenCount, privacy: .public) responseLimit=\(Limits.responseTokens, privacy: .public) condensed=\(condensed, privacy: .public) scope=\(toolScope.rawValue, privacy: .public)")
+    }
+
+    private static func roughTokenCount(_ text: String) -> Int {
+        guard !text.isEmpty else { return 0 }
+        return max(1, Int((Double(text.count) / 4.0).rounded(.up)))
+    }
+
+    private static func instructions(toolScope: AgentToolScope) -> String {
+        let actions = ProposedChangeAction.allCases.map(\.rawValue).joined(separator: ", ")
+
+        return """
+        You are LeadWhisper, a private on-device CRM assistant. You chat with the user about their local contacts, opportunities, and follow-ups, and you prepare CRM changes for review.
+        Today: \(Date.now.formatted(date: .numeric, time: .omitted)).
+        Work in a ReAct loop each turn: think, optionally call available read-only tools, observe, then return one AgentTurn. Record final reasoning in thought.
+        Only use facts from the user's messages and from tool observations. Never invent contacts, opportunities, follow-ups, IDs, companies, budgets, dates, phone numbers, emails, or notes.
+        Available tools this turn: \(toolScope.toolNamesText). \(toolScope.guidance)
+        Use at most a few short lookups. Do not repeat a lookup. Ask one question instead of searching broadly.
+        kind=reply: short answer. kind=clarify: one question with 2-4 options and no changes. kind=propose: reviewable changes only; never say data was saved.
+        If the local CRM has no matching records, say so and offer to create a lead or ask for the missing exact record. Do not target a record that was not found.
+        Required before propose:
+        - createContact needs contactName and company.
+        - updateContact needs exactly one existing contact.
+        - createOpportunity needs contactName or company plus opportunityTitle; include stage when the user names one.
+        - updateOpportunity and updateOpportunityStage need exactly one existing opportunity.
+        - createFollowUp needs a contact or opportunity plus followUpTitle; include dueDateText when the user provides timing.
+        - updateFollowUp and completeFollowUp need exactly one existing follow-up.
+        - delete actions need exactly one existing local record with its UUID in targetID.
+        Stages: lead, qualified, proposalNeeded, proposalSent, won, lost.
+        Follow-up states: open, done, archived.
+        Actions: \(actions).
+        """
+    }
+
+    private func prompt(for message: String) -> String {
+        var lines: [String] = []
+        if let memory = contextMemory.promptPrefix() {
+            lines.append(memory)
+        }
+        if let note = pendingOutcomeNote {
+            lines.append("Note: \(note)")
+        }
+        if consecutiveClarifications >= Limits.consecutiveClarifications {
+            lines.append("Note: you already asked \(consecutiveClarifications) questions in a row. Do not ask another clarification. Reply or propose using what you have.")
+        }
+        lines.append(message)
+        return lines.joined(separator: "\n")
+    }
+
+    private func condensedPrompt(for message: String) -> String {
+        var lines = ["Note: the earlier session exceeded the local model context window and was restarted with compact memory. Use the memory below only as continuity; ask for exact details if anything is missing."]
+        if let memory = contextMemory.promptPrefix() {
+            lines.append(memory)
+        }
+        if let note = pendingOutcomeNote {
+            lines.append("Note: \(note)")
+        }
+        lines.append(message)
+        return lines.joined(separator: "\n")
+    }
+
+    private func timeline(from entries: ArraySlice<Transcript.Entry>, thought: String, condensed: Bool) -> [AgentTimelineItem] {
+        var items: [AgentTimelineItem] = []
+
+        if condensed {
+            items.append(AgentTimelineItem(title: "Context condensed", detail: "The conversation was restarted to fit the on-device model.", systemImage: "arrow.triangle.2.circlepath"))
+        }
+
+        if let thought = thought.nilIfBlank {
+            items.append(AgentTimelineItem(title: "Thought", detail: thought, systemImage: "brain"))
+        }
+
+        for entry in entries {
+            switch entry {
+            case .toolCalls(let calls):
+                for call in calls {
+                    items.append(AgentTimelineItem(title: "Action", detail: actionDetail(for: call), systemImage: "wrench.and.screwdriver"))
+                }
+            case .toolOutput(let output):
+                let snippet = Self.textSnippet(from: output.segments)
+                items.append(AgentTimelineItem(title: "Observation", detail: snippet.map { "\(output.toolName): \($0)" } ?? output.toolName, systemImage: "tray.full"))
+            case .response:
+                items.append(AgentTimelineItem(title: "Final answer", detail: "Structured AgentTurn received.", systemImage: "checkmark.seal"))
+            case .prompt, .instructions:
+                break
+            @unknown default:
+                items.append(AgentTimelineItem(title: "Transcript entry", detail: "Additional model event received.", systemImage: "ellipsis.message"))
+            }
+        }
+
+        if !items.contains(where: { $0.title == "Final answer" }) {
+            items.append(AgentTimelineItem(title: "Final answer", detail: "Structured AgentTurn received.", systemImage: "checkmark.seal"))
+        }
+
+        return items
+    }
+
+    private func actionDetail(for call: Transcript.ToolCall) -> String {
+        let arguments = call.arguments.jsonString
+        guard !arguments.isEmpty, arguments != "{}" else { return call.toolName }
+        return "\(call.toolName) \(String(arguments.prefix(80)))"
+    }
+
+    /// Joins the plain-text parts of a tool output so the ReAct trace can show
+    /// what the model actually observed, truncated to stay card-sized.
+    private static func textSnippet(from segments: [Transcript.Segment]) -> String? {
+        let text = segments
+            .compactMap { segment -> String? in
+                if case .text(let textSegment) = segment {
+                    return textSegment.content
+                }
+                return nil
+            }
+            .joined(separator: " ")
+
+        guard let compact = text.nilIfBlank else { return nil }
+        guard compact.count > 160 else { return compact }
+        return "\(compact.prefix(157))..."
+    }
+
+    private func unavailableResult() -> AgentRunResult {
+        AppLog.agent.info("Foundation Models unavailable availability=\(self.availabilityMessage, privacy: .public); no turn generated")
+        return AgentRunResult(
+            kind: .reply,
+            message: "The on-device model is not available",
+            thought: "",
+            draft: .empty,
+            timeline: [
+                AgentTimelineItem(title: "Model unavailable", detail: availabilityMessage, systemImage: "exclamationmark.triangle")
+            ],
+            availabilityMessage: availabilityMessage,
+            errorMessage: "LeadWhisper needs Apple Foundation Models to draft CRM changes. \(availabilityMessage) No local data was changed."
+        )
+    }
+
+    private func toolBudgetResult() -> AgentRunResult {
+        session = nil
+        AppLog.agent.warning("Agent turn stopped after tool budget guard")
+        return AgentRunResult(
+            kind: .reply,
+            message: "I stopped the lookup loop.",
+            thought: "",
+            draft: .empty,
+            timeline: [
+                AgentTimelineItem(title: "Lookup guard", detail: "The model repeated local lookups, so the turn was stopped before drafting changes.", systemImage: "stop.circle")
+            ],
+            availabilityMessage: availabilityMessage,
+            errorMessage: "I could not prepare reliable CRM changes from that turn. Try naming the exact contact, opportunity, or follow-up."
+        )
+    }
+
+    private func timeoutResult() -> AgentRunResult {
+        AppLog.agent.warning("Agent turn timed out and session was reset")
+        return AgentRunResult(
+            kind: .reply,
+            message: "I stopped that turn.",
+            thought: "",
+            draft: .empty,
+            timeline: [
+                AgentTimelineItem(title: "Turn timeout", detail: "The local model did not finish in time, so the session was reset.", systemImage: "timer")
+            ],
+            availabilityMessage: availabilityMessage,
+            errorMessage: "The agent took too long to prepare a reliable answer. No local data was changed."
+        )
+    }
+
+    private func failureResult(for error: Error, exceededContext: Bool) -> AgentRunResult {
+        AppLog.agent.error("Agent turn failed contextWindow=\(exceededContext, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+
+        let timeline = [
+            AgentTimelineItem(title: "Foundation Model attempted", detail: "No CRM changes were drafted.", systemImage: "brain"),
+            exceededContext
+                ? AgentTimelineItem(title: "Could not draft changes", detail: "The request was too large for the local model.", systemImage: "exclamationmark.triangle")
+                : AgentTimelineItem(title: "Model error", detail: error.localizedDescription, systemImage: "exclamationmark.triangle")
+        ]
+
+        return AgentRunResult(
+            kind: .reply,
+            message: "Could not draft changes",
+            thought: "",
+            draft: .empty,
+            timeline: timeline,
+            availabilityMessage: availabilityMessage,
+            errorMessage: exceededContext ?
+                "That request is too large for the local model. Try a shorter update, or reset the conversation." :
+                "The local model could not prepare CRM changes. No local data was changed."
+        )
+    }
+
+    static func isContextWindowError(_ error: Error) -> Bool {
+        if let generationError = error as? LanguageModelSession.GenerationError {
+            if case .exceededContextWindowSize = generationError {
+                return true
+            }
+        }
+
+        let message = error.localizedDescription.searchKey
+        return message.contains("context window") || message.contains("model context")
+    }
+
+    static func isToolBudgetError(_ error: Error) -> Bool {
+        if error is AgentToolBudgetExceeded {
+            return true
+        }
+
+        let message = error.localizedDescription.searchKey
+        return message.contains("tool budget") ||
+            message.contains("lookup budget") ||
+            message.contains("repeated local lookup")
+    }
+
+    static func availabilityMessage(for availability: SystemLanguageModel.Availability) -> String {
+        switch availability {
+        case .available:
+            "Apple Foundation Models available"
+        case .unavailable(.appleIntelligenceNotEnabled):
+            "Apple Intelligence is not enabled."
+        case .unavailable(.deviceNotEligible):
+            "This device is not eligible for Apple Intelligence."
+        case .unavailable(.modelNotReady):
+            "The on-device model is not ready yet."
+        @unknown default:
+            "Foundation Models availability is unknown."
+        }
+    }
+}
+
+private enum AgentToolScope: String, Sendable {
+    case none
+    case contacts
+    case opportunities
+    case followUps
+    case pipeline
+    case full
+
+    var toolNamesText: String {
+        let names = toolNames
+        return names.isEmpty ? "none" : names.joined(separator: ", ")
+    }
+
+    var estimatedToolDefinitionTokens: Int {
+        toolNames.count * 90
+    }
+
+    var guidance: String {
+        switch self {
+        case .none:
+            "No lookup tools are available. Propose only from user-provided facts or ask one clarification."
+        case .contacts:
+            "Use contact tools only when an existing contact must be identified or read."
+        case .opportunities:
+            "Use opportunity search only when an existing opportunity must be identified."
+        case .followUps:
+            "Use follow-up search only when an existing task must be identified."
+        case .pipeline:
+            "Use the pipeline summary for counts, workload, and due-date overview questions."
+        case .full:
+            "Use lookup tools only for existing records, pipeline questions, or disambiguation."
+        }
+    }
+
+    func tools(dataSource: AgentToolDataSource) -> [any Tool] {
+        switch self {
+        case .none:
+            []
+        case .contacts:
+            [
+                FindContactsTool(dataSource: dataSource),
+                GetContactDetailsTool(dataSource: dataSource)
+            ]
+        case .opportunities:
+            [
+                FindOpportunitiesTool(dataSource: dataSource)
+            ]
+        case .followUps:
+            [
+                FindFollowUpsTool(dataSource: dataSource)
+            ]
+        case .pipeline:
+            [
+                GetPipelineSummaryTool(dataSource: dataSource)
+            ]
+        case .full:
+            [
+                FindContactsTool(dataSource: dataSource),
+                FindOpportunitiesTool(dataSource: dataSource),
+                FindFollowUpsTool(dataSource: dataSource),
+                GetContactDetailsTool(dataSource: dataSource),
+                GetPipelineSummaryTool(dataSource: dataSource)
+            ]
+        }
+    }
+
+    static func infer(from message: String) -> AgentToolScope {
+        let key = message.searchKey
+        guard !key.isEmpty else { return .full }
+
+        if isCreateIntent(key), !isExistingRecordMutation(key) {
+            return .none
+        }
+
+        if isPipelineQuestion(key) {
+            return .pipeline
+        }
+
+        if mentionsFollowUp(key) {
+            return .followUps
+        }
+
+        if mentionsOpportunity(key) {
+            return .opportunities
+        }
+
+        if mentionsContact(key) {
+            return .contacts
+        }
+
+        return .full
+    }
+
+    private var toolNames: [String] {
+        switch self {
+        case .none:
+            []
+        case .contacts:
+            ["findContacts", "getContactDetails"]
+        case .opportunities:
+            ["findOpportunities"]
+        case .followUps:
+            ["findFollowUps"]
+        case .pipeline:
+            ["getPipelineSummary"]
+        case .full:
+            ["findContacts", "findOpportunities", "findFollowUps", "getContactDetails", "getPipelineSummary"]
+        }
+    }
+
+    private static func isCreateIntent(_ key: String) -> Bool {
+        key.contains("create") ||
+            key.contains("add contact") ||
+            key.contains("add a contact") ||
+            key.contains("add lead") ||
+            key.contains("add a lead") ||
+            key.contains("add opportunity") ||
+            key.contains("add follow") ||
+            key.contains("new contact") ||
+            key.contains("new lead") ||
+            key.contains("new opportunity") ||
+            key.contains("anlegen") ||
+            key.contains("erstell") ||
+            key.contains("hinzufug") ||
+            key.contains("neuer lead") ||
+            key.contains("neuer kontakt") ||
+            key.contains("neue chance") ||
+            key.contains("neue opportunity")
+    }
+
+    private static func isExistingRecordMutation(_ key: String) -> Bool {
+        key.contains("update") ||
+            key.contains("change") ||
+            key.contains("edit") ||
+            key.contains("delete") ||
+            key.contains("remove") ||
+            key.contains("complete") ||
+            key.contains("done") ||
+            key.contains("archive") ||
+            key.contains("stage") ||
+            key.contains("won") ||
+            key.contains("lost") ||
+            key.contains("ander") ||
+            key.contains("losch") ||
+            key.contains("abschliess") ||
+            key.contains("fertig")
+    }
+
+    private static func isPipelineQuestion(_ key: String) -> Bool {
+        guard !isExistingRecordMutation(key) else { return false }
+        return key.contains("pipeline") ||
+            key.contains("summary") ||
+            key.contains("overview") ||
+            key.contains("status") ||
+            key.contains("workload") ||
+            key.contains("how many") ||
+            key.contains("count") ||
+            key.contains("today") ||
+            key.contains("due") ||
+            key.contains("uberblick") ||
+            key.contains("faellig")
+    }
+
+    private static func mentionsFollowUp(_ key: String) -> Bool {
+        key.contains("follow") ||
+            key.contains("remind") ||
+            key.contains("task") ||
+            key.contains("todo") ||
+            key.contains("nachfass") ||
+            key.contains("erinner") ||
+            key.contains("aufgabe")
+    }
+
+    private static func mentionsOpportunity(_ key: String) -> Bool {
+        key.contains("opportunity") ||
+            key.contains("deal") ||
+            key.contains("proposal") ||
+            key.contains("budget") ||
+            key.contains("stage") ||
+            key.contains("qualified") ||
+            key.contains("won") ||
+            key.contains("lost") ||
+            key.contains("chance") ||
+            key.contains("angebot")
+    }
+
+    private static func mentionsContact(_ key: String) -> Bool {
+        key.contains("contact") ||
+            key.contains("lead") ||
+            key.contains("company") ||
+            key.contains("email") ||
+            key.contains("phone") ||
+            key.contains("kontakt") ||
+            key.contains("firma") ||
+            key.contains("telefon")
+    }
+}

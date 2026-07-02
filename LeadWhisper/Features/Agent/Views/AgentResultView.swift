@@ -3,36 +3,58 @@ import SwiftUI
 struct AgentResultView: View {
     let runResult: AgentRunResult
     var showsActions = true
-    let save: () -> Void
+    let save: (Set<String>) -> Void
     let cancel: () -> Void
     let answerClarification: (String) -> Void
 
+    @AppStorage(AgentSettings.debugModeKey) private var isDebugModeEnabled = false
+    @State private var showsDetails = false
+    @State private var deselectedChangeIDs: Set<String> = []
+
+    private var selectedChangeIDs: Set<String> {
+        Set(runResult.draft.proposedChanges.map(\.id)).subtracting(deselectedChangeIDs)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if isDebugModeEnabled {
+                Text(runResult.kind.rawValue.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.blue)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.blue.opacity(0.12), in: Capsule())
+            }
+
             if let errorMessage = runResult.errorMessage?.nilIfBlank {
                 AgentNoticeView(
-                    title: runResult.draft.summary.nilIfBlank ?? "Could not draft changes",
+                    title: runResult.message.nilIfBlank ?? "Could not draft changes",
                     detail: errorMessage,
                     systemImage: "exclamationmark.triangle",
                     tint: .orange
                 )
-            }
-
-            if !runResult.timeline.isEmpty {
-                AgentTimelineView(items: runResult.timeline)
-            }
-
-            if !runResult.draft.detectedFacts.isEmpty {
-                DetectedFactsView(facts: runResult.draft.detectedFacts)
+            } else if let message = runResult.message.nilIfBlank {
+                Text(message)
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let clarification = runResult.draft.clarification {
                 ClarificationView(clarification: clarification, isEnabled: showsActions, select: answerClarification)
-                if showsActions {
-                    cancelDraftButton
-                }
             } else if !runResult.draft.proposedChanges.isEmpty {
-                ProposedChangesView(changes: runResult.draft.proposedChanges)
+                ProposedChangesView(
+                    changes: runResult.draft.proposedChanges,
+                    diffs: runResult.diffs,
+                    isSelectable: showsActions,
+                    isSelected: { !deselectedChangeIDs.contains($0) },
+                    toggleSelection: { id in
+                        if deselectedChangeIDs.contains(id) {
+                            deselectedChangeIDs.remove(id)
+                        } else {
+                            deselectedChangeIDs.insert(id)
+                        }
+                    }
+                )
                 if showsActions && runResult.draft.canApply {
                     reviewActionButtons
                 }
@@ -44,8 +66,46 @@ struct AgentResultView: View {
                     tint: .blue
                 )
             }
+
+            if hasDetails {
+                detailsSection
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var hasDetails: Bool {
+        !runResult.timeline.isEmpty || !runResult.draft.detectedFacts.isEmpty
+    }
+
+    @ViewBuilder
+    private var detailsSection: some View {
+        if !isDebugModeEnabled {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) {
+                    showsDetails.toggle()
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .rotationEffect(.degrees(showsDetails ? 90 : 0))
+                    Text(showsDetails ? "Hide details" : "Details")
+                }
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+
+        if showsDetails || isDebugModeEnabled {
+            if !runResult.draft.detectedFacts.isEmpty {
+                DetectedFactsView(facts: runResult.draft.detectedFacts)
+            }
+            if !runResult.timeline.isEmpty {
+                AgentTimelineView(items: runResult.timeline)
+            }
+        }
     }
 
     private var reviewActionButtons: some View {
@@ -72,25 +132,24 @@ struct AgentResultView: View {
         .buttonStyle(.bordered)
     }
 
-    private var cancelDraftButton: some View {
-        Button(role: .cancel, action: cancel) {
-            Label("Cancel Draft", systemImage: "xmark")
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-                .frame(maxWidth: .infinity, minHeight: 44)
-        }
-        .buttonStyle(.bordered)
-    }
-
     private var saveButton: some View {
-        Button(action: save) {
-            Label("Save Changes", systemImage: "checkmark")
+        Button {
+            save(selectedChangeIDs)
+        } label: {
+            Label(saveButtonTitle, systemImage: "checkmark")
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
                 .frame(maxWidth: .infinity, minHeight: 44)
         }
         .buttonStyle(.borderedProminent)
-        .disabled(!runResult.draft.canApply)
+        .disabled(!runResult.draft.canApply || selectedChangeIDs.isEmpty)
+    }
+
+    private var saveButtonTitle: String {
+        let total = runResult.draft.proposedChanges.count
+        let selected = selectedChangeIDs.count
+        guard total > 1, selected < total else { return "Save Changes" }
+        return "Save \(selected) of \(total)"
     }
 }
 
@@ -99,7 +158,7 @@ private struct AgentTimelineView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("What I checked")
+            Text("Reasoning")
                 .font(.subheadline.weight(.semibold))
             ForEach(items) { item in
                 HStack(alignment: .top, spacing: 10) {
@@ -151,13 +210,23 @@ private struct DetectedFactsView: View {
 
 private struct ProposedChangesView: View {
     let changes: [ProposedChange]
+    let diffs: [String: [ProposedChangeDiffField]]
+    let isSelectable: Bool
+    let isSelected: (String) -> Bool
+    let toggleSelection: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Proposed Changes")
                 .font(.headline)
             ForEach(changes) { change in
-                ProposedChangeCard(change: change)
+                ProposedChangeCard(
+                    change: change,
+                    diff: diffs[change.id],
+                    isSelectable: isSelectable,
+                    isSelected: isSelected(change.id),
+                    toggleSelection: { toggleSelection(change.id) }
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -197,6 +266,10 @@ private struct AgentNoticeView: View {
 
 private struct ProposedChangeCard: View {
     let change: ProposedChange
+    let diff: [ProposedChangeDiffField]?
+    let isSelectable: Bool
+    let isSelected: Bool
+    let toggleSelection: () -> Void
 
     private var isDestructive: Bool {
         change.action.isDestructive
@@ -205,6 +278,15 @@ private struct ProposedChangeCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
+                if isSelectable {
+                    Button(action: toggleSelection) {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.headline)
+                            .foregroundStyle(isSelected ? (isDestructive ? Color.red : .blue) : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isSelected ? "Exclude \(change.title)" : "Include \(change.title)")
+                }
                 Label(change.title, systemImage: change.action.systemImage)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(isDestructive ? .red : .primary)
@@ -218,8 +300,9 @@ private struct ProposedChangeCard: View {
                     .minimumScaleFactor(0.8)
             }
 
-            ProposedChangeDetails(change: change)
+            ProposedChangeDetails(change: change, diff: diff)
                 .font(.footnote)
+                .opacity(isSelected ? 1 : 0.45)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -233,9 +316,30 @@ private struct ProposedChangeCard: View {
 
 private struct ProposedChangeDetails: View {
     let change: ProposedChange
+    var diff: [ProposedChangeDiffField]?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            if let diff, !diff.isEmpty {
+                ForEach(diff) { field in
+                    ChangeDiffRow(field: field)
+                }
+                if let notes = change.notes?.nilIfBlank {
+                    Text(notes)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+                TagStrip(tags: change.tags)
+            } else {
+                standardRows
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var standardRows: some View {
+        Group {
             if let contactName = change.contactName?.nilIfBlank {
                 ChangeDetailRow(title: "Contact", value: contactName)
             }
@@ -296,6 +400,35 @@ private struct ChangeDetailRow: View {
     }
 }
 
+private struct ChangeDiffRow: View {
+    let field: ProposedChangeDiffField
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(field.title)
+                .foregroundStyle(.secondary)
+                .frame(width: 88, alignment: .leading)
+            if let oldValue = field.oldValue {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(oldValue)
+                        .strikethrough()
+                        .foregroundStyle(.secondary)
+                    Text("-> \(field.newValue)")
+                        .fontWeight(.medium)
+                }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(field.newValue)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private extension DetectedFactKind {
     var systemImage: String {
         switch self {
@@ -351,50 +484,54 @@ private struct ClarificationView: View {
                     .foregroundStyle(.blue)
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("I need one detail before I can draft this.")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
                     Text(clarification.question)
                         .font(.body.weight(.medium))
                         .fixedSize(horizontal: false, vertical: true)
+                    if clarification.allowsFreeText == true {
+                        Text(clarification.placeholder?.nilIfBlank ?? "Type your answer below.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            ForEach(clarification.options, id: \.self) { option in
-                Button {
-                    select(option)
-                } label: {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: iconName(for: option))
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.blue)
-                            .frame(width: 22)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(option)
+            if !clarification.options.isEmpty {
+                ForEach(clarification.options, id: \.self) { option in
+                    Button {
+                        select(option)
+                    } label: {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: iconName(for: option))
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(nil)
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text("Use this answer")
-                                .font(.caption)
+                                .foregroundStyle(.blue)
+                                .frame(width: 22)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(nil)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("Use this answer")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.up.message")
+                                .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.secondary)
+                                .padding(.top, 2)
                         }
-                        Spacer()
-                        Image(systemName: "arrow.up.message")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 2)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(.blue.opacity(0.16))
+                        }
                     }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(.blue.opacity(0.16))
-                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isEnabled)
                 }
-                .buttonStyle(.plain)
-                .disabled(!isEnabled)
             }
         }
         .padding(14)

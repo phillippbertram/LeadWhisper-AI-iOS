@@ -187,8 +187,12 @@ struct ChangeExecutor {
             return contact
         }
 
+        guard let contactName = change.contactName?.nilIfBlank else {
+            throw AgentDraftError.unsafeDestructiveChange("I need a real contact name before saving this draft.")
+        }
+
         let contact = Contact(
-            fullName: change.contactName?.nilIfBlank ?? "Unknown Contact",
+            fullName: contactName,
             company: change.company ?? "",
             notes: change.notes ?? "",
             tags: change.tags
@@ -225,8 +229,12 @@ struct ChangeExecutor {
             return opportunity
         }
 
+        guard let opportunityTitle = change.opportunityTitle?.nilIfBlank else {
+            throw AgentDraftError.unsafeDestructiveChange("I need a real opportunity title before saving this draft.")
+        }
+
         let opportunity = Opportunity(
-            title: change.opportunityTitle?.nilIfBlank ?? "New Opportunity",
+            title: opportunityTitle,
             company: change.company?.nilIfBlank ?? contact?.company ?? "",
             contact: contact
         )

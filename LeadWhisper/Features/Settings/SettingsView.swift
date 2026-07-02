@@ -10,6 +10,7 @@ struct SettingsView: View {
     @Query private var followUps: [FollowUpTask]
     @Query private var interactions: [Interaction]
     @Query private var activityEvents: [ActivityEvent]
+    @AppStorage(AgentSettings.debugModeKey) private var isAgentDebugModeEnabled = false
     @State private var isConfirmingDeleteAllData = false
     @State private var statusMessage: String?
     @State private var actionError: PresentableError?
@@ -27,6 +28,16 @@ struct SettingsView: View {
                     LabeledContent("Follow-ups", value: followUps.count.formatted())
                     LabeledContent("Interactions", value: interactions.count.formatted())
                     LabeledContent("Activity entries", value: activityEvents.count.formatted())
+                }
+
+                Section {
+                    Toggle(isOn: $isAgentDebugModeEnabled) {
+                        Label("Show Agent Reasoning", systemImage: "brain")
+                    }
+                } header: {
+                    Text("Agent")
+                } footer: {
+                    Text("Always expands the agent's ReAct trace - thought, tool actions, and observations - on every result card.")
                 }
 
                 Section("Demo") {

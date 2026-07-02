@@ -61,6 +61,7 @@ enum OpportunityStage: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    // TODO: more sophisticated by integrating LLM for text interpretation?
     static func from(_ text: String?) -> OpportunityStage? {
         guard let text else { return nil }
         if let rawStage = OpportunityStage(rawValue: text) {

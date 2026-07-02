@@ -26,12 +26,16 @@ extension Container {
     }
 
     @MainActor
-    var leadAgentService: Factory<LeadAgentService> {
+    var agentConversationEngine: Factory<AgentConversationEngine> {
         self {
-            LeadAgentService(
-                repository: self.crmRepository(),
-                toolDataSource: self.agentToolDataSource()
-            )
+            AgentConversationEngine(toolDataSource: self.agentToolDataSource())
+        }
+    }
+
+    @MainActor
+    var changeDiffBuilder: Factory<ChangeDiffBuilder> {
+        self {
+            ChangeDiffBuilder(repository: self.crmRepository())
         }
     }
 

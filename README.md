@@ -18,7 +18,32 @@ The app is built around a simple idea: after a call, meeting, or quick thought, 
 
 LeadWhisper uses Apple Foundation Models through `FoundationModels` when available on the device. CRM lookups are performed against the local SwiftData store, and the agent can use read-only tools to find matching contacts, opportunities, and follow-ups before proposing changes.
 
-If Apple Foundation Models are unavailable, LeadWhisper falls back to a deterministic demo parser so the app remains testable and useful for demos. Voice input uses Apple's Speech and AVFoundation APIs; on unsupported environments, you can type the transcript instead.
+The agent works exclusively with the real local CRM data and never fabricates records. If Apple Foundation Models are unavailable, the agent says so clearly and drafts nothing. Voice input uses Apple's Speech and AVFoundation APIs; on unsupported environments, you can type the transcript instead.
+
+## Agent Architecture
+
+The Agent tab is a small on-device deep agent: the model - not a scripted workflow - decides each turn whether to answer, ask one follow-up question, or propose reviewable CRM changes.
+
+```mermaid
+flowchart TD
+    U[User message] --> E[AgentConversationEngine<br/>persistent LanguageModelSession]
+    E --> R{ReAct loop}
+    R -->|Action| T[Read-only tools<br/>findContacts / findOpportunities / findFollowUps<br/>getContactDetails / getPipelineSummary]
+    T -->|Observation| R
+    R -->|Thought recorded| A[AgentTurn]
+    A -->|reply| C[Chat bubble]
+    A -->|clarify| Q[One question with options]
+    A -->|propose| V[Review card<br/>old-to-new diffs / per-change selection]
+    Q --> U
+    V -->|Cancel| U
+    V -->|Save, destructive changes reconfirmed| X[ChangeExecutor]
+    X --> D[(SwiftData)]
+```
+
+- **One session per conversation.** Follow-up answers are real model turns with full context. On context-window overflow the engine condenses the conversation and retries once.
+- **ReAct trace.** Every turn records a thought plus the action/observation sequence. The trace is visible behind a "Details" disclosure on each card, or always with the "Show Agent Reasoning" toggle in Settings.
+- **Loop guards.** A per-turn lookup budget and a cap on consecutive clarification rounds keep the loop convergent - the LangChain `max_iterations` and early-stopping ideas applied to Foundation Models.
+- **Review before save.** The model only proposes. `ChangeDiffBuilder` resolves the targeted records and shows old-to-new diffs, individual changes can be deselected, and destructive changes require an extra confirmation before `ChangeExecutor` mutates SwiftData.
 
 ## App Structure
 
@@ -46,7 +71,7 @@ If Apple Foundation Models are unavailable, LeadWhisper falls back to a determin
 - Apple Intelligence-capable device for Foundation Models
 - Microphone and speech recognition permissions for voice input
 
-Voice recording is intentionally unavailable in the simulator. The transcript editor and demo parser still allow you to run and test the core workflow there.
+Voice recording is intentionally unavailable in the simulator. You can type transcripts there instead; drafting CRM changes requires a device with Apple Intelligence.
 
 ## Getting Started
 

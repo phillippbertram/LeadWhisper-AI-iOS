@@ -32,6 +32,18 @@ struct FindFollowUpsArguments: Sendable {
     }
 }
 
+/// Thrown by the engine's budget wrapper instead of running another lookup.
+/// This must escape the tool call so the app can end the turn immediately.
+struct AgentToolBudgetExceeded: LocalizedError {
+    var reason: String
+
+    var errorDescription: String? {
+        "Agent tool budget exceeded. \(reason)"
+    }
+}
+
+struct AgentTurnTimeout: Error {}
+
 struct FindContactsTool: Tool {
     let dataSource: AgentToolDataSource
 
@@ -73,6 +85,60 @@ struct FindOpportunitiesTool: Tool {
         let matches = try await dataSource.opportunities(arguments.query, ToolText.resultLimit)
         AppLog.tools.debug("findOpportunities query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
         return ToolText.opportunities(matches)
+    }
+}
+
+@Generable(description: "Arguments for reading one contact's full local CRM details.")
+struct ContactDetailsArguments: Sendable {
+    @Guide(description: "Contact name or company to look up.")
+    var query: String
+
+    init(query: String) {
+        self.query = query
+    }
+}
+
+struct GetContactDetailsTool: Tool {
+    let dataSource: AgentToolDataSource
+
+    var name: String { "getContactDetails" }
+    var description: String {
+        "Read one contact's full local details: role, email, phone, notes, tags, opportunities, and open follow-ups. This tool is read-only."
+    }
+
+    @concurrent
+    func call(arguments: ContactDetailsArguments) async throws -> String {
+        let key = arguments.query.searchKey
+        guard !key.isEmpty else {
+            AppLog.tools.warning("getContactDetails rejected empty query")
+            return ToolText.emptyQuery
+        }
+
+        let snapshot = try await dataSource.snapshot()
+        AppLog.tools.debug("getContactDetails query=\(arguments.query, privacy: .private)")
+        return ToolText.contactDetails(snapshot, query: arguments.query)
+    }
+}
+
+@Generable(description: "Arguments for summarizing the local CRM pipeline.")
+struct PipelineSummaryArguments: Sendable {
+    @Guide(description: "Optional focus: contacts, opportunities, or followUps.")
+    var focus: String?
+}
+
+struct GetPipelineSummaryTool: Tool {
+    let dataSource: AgentToolDataSource
+
+    var name: String { "getPipelineSummary" }
+    var description: String {
+        "Summarize the local CRM: contact count, opportunities per stage, and open follow-ups with due dates. This tool is read-only."
+    }
+
+    @concurrent
+    func call(arguments: PipelineSummaryArguments) async throws -> String {
+        let snapshot = try await dataSource.snapshot()
+        AppLog.tools.debug("getPipelineSummary focus=\(arguments.focus ?? "-", privacy: .public) contacts=\(snapshot.contacts.count, privacy: .public) opportunities=\(snapshot.opportunities.count, privacy: .public) followUps=\(snapshot.followUps.count, privacy: .public)")
+        return ToolText.pipelineSummary(snapshot, focus: arguments.focus)
     }
 }
 
@@ -126,6 +192,74 @@ enum ToolText {
             "followUp id=\($0.id) title=\($0.title.compactToolValue) due=\($0.dueDateText.compactToolValue) state=\($0.state) notes=\($0.notes.compactToolValue)"
         }
         .joined(separator: "\n")
+    }
+
+    nonisolated static func contactDetails(_ snapshot: CRMDataSnapshot, query: String) -> String {
+        let key = query.searchKey
+        let matches = snapshot.contacts.filter {
+            $0.fullName.searchKey.contains(key) ||
+                key.contains($0.fullName.searchKey) ||
+                (!$0.company.searchKey.isEmpty && $0.company.searchKey.contains(key))
+        }
+
+        guard let contact = matches.first else { return noMatches }
+        guard matches.count == 1 else {
+            return "Multiple contacts match. Ask which one:\n" + contacts(Array(matches.prefix(resultLimit)))
+        }
+
+        var lines = [contacts([contact])]
+        if let notes = contact.notes.nilIfBlank {
+            lines.append("notes=\(String(notes.prefix(160)))")
+        }
+
+        let related = snapshot.opportunities.filter { $0.contactID == contact.id }
+        if !related.isEmpty {
+            lines.append(opportunities(Array(related.prefix(3))))
+        }
+
+        let open = snapshot.followUps.filter { $0.contactID == contact.id && $0.state == FollowUpState.open.rawValue }
+        if !open.isEmpty {
+            lines.append(followUps(Array(open.prefix(3))))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func pipelineSummary(_ snapshot: CRMDataSnapshot, focus: String?) -> String {
+        let focusKey = focus?.searchKey ?? ""
+        let wantsContacts = focusKey.isEmpty || focusKey.contains("contact")
+        let wantsOpportunities = focusKey.isEmpty || focusKey.contains("opportun")
+        let wantsFollowUps = focusKey.isEmpty || focusKey.contains("follow")
+
+        var lines: [String] = []
+
+        if wantsContacts {
+            lines.append("contacts total=\(snapshot.contacts.count)")
+        }
+
+        if wantsOpportunities {
+            if snapshot.opportunities.isEmpty {
+                lines.append("opportunities none")
+            } else {
+                let byStage = Dictionary(grouping: snapshot.opportunities, by: \.stage)
+                let stageCounts = byStage.keys.sorted().map { "\($0)=\(byStage[$0]?.count ?? 0)" }.joined(separator: " ")
+                lines.append("opportunities total=\(snapshot.opportunities.count) \(stageCounts)")
+            }
+        }
+
+        if wantsFollowUps {
+            let open = snapshot.followUps.filter { $0.state == FollowUpState.open.rawValue }
+            if open.isEmpty {
+                lines.append("open followUps none")
+            } else {
+                lines.append("open followUps total=\(open.count)")
+                for followUp in open.prefix(resultLimit) {
+                    lines.append("followUp id=\(followUp.id) title=\(followUp.title.compactToolValue) due=\(followUp.dueDateText.compactToolValue)")
+                }
+            }
+        }
+
+        return lines.isEmpty ? "No local CRM data yet." : lines.joined(separator: "\n")
     }
 }
 

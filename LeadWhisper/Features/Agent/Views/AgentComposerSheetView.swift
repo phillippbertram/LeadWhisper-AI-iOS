@@ -5,7 +5,7 @@ struct AgentComposerSheetView: View {
 
     var body: some View {
         NavigationStack {
-            AgentComposerView(showTitle: true)
+            AgentComposerView()
                 .navigationTitle("Agent")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(.regularMaterial, for: .navigationBar)
