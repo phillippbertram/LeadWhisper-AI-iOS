@@ -4,6 +4,21 @@ LeadWhisper is a Swift-native agent showcase for iPhone CRM workflows. It starte
 
 The app is built around a simple idea: after a call, meeting, or quick thought, you can speak or type what happened. LeadWhisper extracts contacts, opportunities, follow-ups, notes, stages, and activity history, then proposes safe CRM changes you can approve or discard.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-agent.jpg" alt="LeadWhisper Agent screen" width="180"><br><sub>Agent</sub></td>
+    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-today.jpg" alt="LeadWhisper Today screen" width="180"><br><sub>Today</sub></td>
+    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-contacts.jpg" alt="LeadWhisper Contacts screen" width="180"><br><sub>Contacts</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-opportunities.jpg" alt="LeadWhisper Opportunities screen" width="180"><br><sub>Opportunities</sub></td>
+    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-settings.jpg" alt="LeadWhisper Settings screen" width="180"><br><sub>Settings</sub></td>
+    <td></td>
+  </tr>
+</table>
+
 ## Project Intent
 
 LeadWhisper is an experiment in implementing an agent natively in Swift rather than wrapping a Python or JavaScript agent runtime. The original idea was to build a private-first agent on top of Apple's on-device [Foundation Models](https://developer.apple.com/documentation/foundationmodels) framework. In practice, the small context window and the overhead from instructions, tool schemas, structured output, observations, and prior turns leave too little room for a useful CRM agent.
