@@ -69,6 +69,14 @@ Building this in Swift is still much more hands-on than building a comparable se
 - **Few Swift-native LLM options beyond Apple.** There are far fewer mature Swift libraries for working directly with providers such as OpenAI or Anthropic than there are in Python and JavaScript. A production iOS app that uses those providers usually needs its own backend for API-key protection, auth, rate limiting, logging, orchestration, and privacy controls. LeadWhisper avoids that tradeoff by staying on device.
 - **The context window changes the product.** Even with compact memory, session refreshes, token counting, and scoped tools, a small on-device context window makes broad, long-running agents difficult. LeadWhisper keeps the agent narrow, keeps tool results short, asks focused clarification questions, and treats every draft as a bounded local task.
 
+## Outlook
+
+The OS 27 betas point toward a more flexible Foundation Models ecosystem. Anthropic's [Claude for Foundation Models](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/apple-foundation-models) package makes Claude available as a server-side `LanguageModel` provider for Apple's Foundation Models framework, and Apple also documents [`PrivateCloudComputeLanguageModel`](https://developer.apple.com/documentation/foundationmodels/privatecloudcomputelanguagemodel) as another Foundation Models type to watch. In that model, a Swift app can keep using `LanguageModelSession`, guided generation, streaming, structured output, and tool calling while swapping Apple's on-device `SystemLanguageModel` for a hosted or private-cloud-backed model when a task needs larger context, stronger reasoning, image input, or server-side tools.
+
+That direction is promising for LeadWhisper because the app's agent harness is already built around Foundation Models concepts rather than a provider-specific API. A future version could potentially remain local-first by default, then offer an explicit escalation path for larger or more complex CRM turns.
+
+It would also change the privacy and architecture tradeoffs. Anthropic's documentation says requests go directly from the app to the Claude API, not through Apple. For production, the docs recommend a proxy flow instead of shipping an API key in the app binary. So this does not remove the need for backend thinking, but it could make the Swift-side agent code much less bespoke than today's cloud LLM integrations.
+
 ## Reference Links
 
 - [ReAct: Synergizing Reasoning and Acting in Language Models](https://arxiv.org/abs/2210.03629)
@@ -78,8 +86,10 @@ Building this in Swift is still much more hands-on than building a comparable se
 - [`Tool`](https://developer.apple.com/documentation/foundationmodels/tool) and [tool calling](https://developer.apple.com/documentation/foundationmodels/expanding-generation-with-tool-calling)
 - [`@Generable`](https://developer.apple.com/documentation/foundationmodels/generable)
 - [`SystemLanguageModel.contextSize`](https://developer.apple.com/documentation/foundationmodels/systemlanguagemodel/contextsize)
+- [`PrivateCloudComputeLanguageModel`](https://developer.apple.com/documentation/foundationmodels/privatecloudcomputelanguagemodel)
 - [LangChain Agents](https://docs.langchain.com/oss/python/langchain/agents)
 - [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)
+- [Claude for Apple Foundation Models](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/apple-foundation-models)
 
 ## App Structure
 
