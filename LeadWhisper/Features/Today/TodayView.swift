@@ -4,10 +4,18 @@ import SwiftUI
 struct TodayView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var followUps: [FollowUpTask]
-    @Query private var activity: [ActivityEvent]
+    @Query private var latestActivity: [ActivityEvent]
     @State private var sheet: TodaySheet?
     @State private var pendingDeleteTask: FollowUpTask?
     @State private var actionError: PresentableError?
+
+    init() {
+        var descriptor = FetchDescriptor<ActivityEvent>(
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        _latestActivity = Query(descriptor)
+    }
 
     private var openFollowUps: [FollowUpTask] {
         followUps
@@ -26,8 +34,8 @@ struct TodayView: View {
             }
     }
 
-    private var recentActivity: [ActivityEvent] {
-        activity.sorted { $0.createdAt > $1.createdAt }.prefix(8).map { $0 }
+    private var latestActivityEvent: ActivityEvent? {
+        latestActivity.first
     }
 
     var body: some View {
@@ -72,12 +80,12 @@ struct TodayView: View {
                     }
                 }
 
-                Section("Recent Activity") {
-                    if recentActivity.isEmpty {
-                        ContentUnavailableView("No activity yet", systemImage: "clock")
-                    } else {
-                        ForEach(recentActivity) { event in
-                            ActivityRow(event: event)
+                if let latestActivityEvent {
+                    Section {
+                        NavigationLink {
+                            ActivityLogView()
+                        } label: {
+                            ActivitySummaryRow(event: latestActivityEvent)
                         }
                     }
                 }
@@ -176,12 +184,56 @@ private struct FollowUpRow: View {
     }
 }
 
+private struct ActivitySummaryRow: View {
+    let event: ActivityEvent
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: event.activityIconName)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Recent Activity")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(event.title)
+                    .font(.footnote.weight(.medium))
+                    .lineLimit(1)
+                Text(event.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct ActivityLogView: View {
+    @Query(sort: [SortDescriptor(\ActivityEvent.createdAt, order: .reverse)])
+    private var activityEvents: [ActivityEvent]
+
+    var body: some View {
+        List {
+            if activityEvents.isEmpty {
+                ContentUnavailableView("No activity yet", systemImage: "clock")
+            } else {
+                ForEach(activityEvents) { event in
+                    ActivityRow(event: event)
+                }
+            }
+        }
+        .navigationTitle("Activity Log")
+    }
+}
+
 private struct ActivityRow: View {
     let event: ActivityEvent
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
+            Image(systemName: event.activityIconName)
                 .foregroundStyle(.blue)
                 .frame(width: 28, height: 28)
 
@@ -201,9 +253,11 @@ private struct ActivityRow: View {
         }
         .padding(.vertical, 4)
     }
+}
 
-    private var icon: String {
-        switch event.entityKind {
+private extension ActivityEvent {
+    var activityIconName: String {
+        switch entityKind {
         case "contact":
             "person.crop.circle"
         case "opportunity":
