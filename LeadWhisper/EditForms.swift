@@ -84,6 +84,7 @@ struct ContactEditView: View {
     @Environment(\.dismiss) private var dismiss
     let contact: Contact
     @State private var draft: ContactEditDraft
+    @State private var saveError: PresentableError?
 
     init(contact: Contact) {
         self.contact = contact
@@ -126,6 +127,7 @@ struct ContactEditView: View {
                     .disabled(!draft.isValid)
                 }
             }
+            .crmErrorAlert($saveError)
         }
     }
 
@@ -141,8 +143,12 @@ struct ContactEditView: View {
 
         let repository = CRMRepository(context: modelContext)
         repository.addActivity(title: "Contact updated", detail: contact.fullName, entityKind: "contact", entityID: contact.id)
-        try? repository.save()
-        dismiss()
+        do {
+            try repository.save()
+            dismiss()
+        } catch {
+            saveError = PresentableError(error)
+        }
     }
 }
 
@@ -151,6 +157,7 @@ struct OpportunityEditView: View {
     @Environment(\.dismiss) private var dismiss
     let opportunity: Opportunity
     @State private var draft: OpportunityEditDraft
+    @State private var saveError: PresentableError?
 
     init(opportunity: Opportunity) {
         self.opportunity = opportunity
@@ -199,6 +206,7 @@ struct OpportunityEditView: View {
                     .disabled(!draft.isValid)
                 }
             }
+            .crmErrorAlert($saveError)
         }
     }
 
@@ -215,8 +223,12 @@ struct OpportunityEditView: View {
 
         let repository = CRMRepository(context: modelContext)
         repository.addActivity(title: "Opportunity updated", detail: opportunity.title, entityKind: "opportunity", entityID: opportunity.id)
-        try? repository.save()
-        dismiss()
+        do {
+            try repository.save()
+            dismiss()
+        } catch {
+            saveError = PresentableError(error)
+        }
     }
 }
 
@@ -225,6 +237,7 @@ struct FollowUpEditView: View {
     @Environment(\.dismiss) private var dismiss
     let task: FollowUpTask
     @State private var draft: FollowUpEditDraft
+    @State private var saveError: PresentableError?
 
     init(task: FollowUpTask) {
         self.task = task
@@ -269,6 +282,7 @@ struct FollowUpEditView: View {
                     .disabled(!draft.isValid)
                 }
             }
+            .crmErrorAlert($saveError)
         }
     }
 
@@ -282,8 +296,12 @@ struct FollowUpEditView: View {
 
         let repository = CRMRepository(context: modelContext)
         repository.addActivity(title: "Follow-up updated", detail: task.title, entityKind: "followUp", entityID: task.id)
-        try? repository.save()
-        dismiss()
+        do {
+            try repository.save()
+            dismiss()
+        } catch {
+            saveError = PresentableError(error)
+        }
     }
 }
 

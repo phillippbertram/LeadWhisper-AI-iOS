@@ -10,6 +10,7 @@ struct ContactsView: View {
     @State private var sheet: ContactsSheet?
     @State private var pendingDeleteContact: Contact?
     @State private var pendingDeleteFollowUp: FollowUpTask?
+    @State private var actionError: PresentableError?
 
     private var filteredContacts: [Contact] {
         let sorted = contacts.sorted {
@@ -38,8 +39,8 @@ struct ContactsView: View {
                             followUps: followUps,
                             editContact: { sheet = .editContact(contact.id) },
                             editFollowUp: { sheet = .editFollowUp($0.id) },
-                            markFollowUpDone: { try? CRMRepository(context: modelContext).markFollowUpDone($0) },
-                            archiveFollowUp: { try? CRMRepository(context: modelContext).archiveFollowUp($0) },
+                            markFollowUpDone: { task in perform { try $0.markFollowUpDone(task) } },
+                            archiveFollowUp: { task in perform { try $0.archiveFollowUp(task) } },
                             deleteFollowUp: { pendingDeleteFollowUp = $0 }
                         )
                     } label: {
@@ -90,7 +91,7 @@ struct ContactsView: View {
             ) {
                 Button("Delete Contact", role: .destructive) {
                     if let pendingDeleteContact {
-                        try? CRMRepository(context: modelContext).deleteContact(pendingDeleteContact)
+                        perform { try $0.deleteContact(pendingDeleteContact) }
                     }
                     pendingDeleteContact = nil
                 }
@@ -110,7 +111,7 @@ struct ContactsView: View {
             ) {
                 Button("Delete Follow-up", role: .destructive) {
                     if let pendingDeleteFollowUp {
-                        try? CRMRepository(context: modelContext).deleteFollowUp(pendingDeleteFollowUp)
+                        perform { try $0.deleteFollowUp(pendingDeleteFollowUp) }
                     }
                     pendingDeleteFollowUp = nil
                 }
@@ -118,6 +119,15 @@ struct ContactsView: View {
                     pendingDeleteFollowUp = nil
                 }
             }
+            .crmErrorAlert($actionError)
+        }
+    }
+
+    private func perform(_ action: (CRMRepository) throws -> Void) {
+        do {
+            try action(CRMRepository(context: modelContext))
+        } catch {
+            actionError = PresentableError(error)
         }
     }
 }

@@ -4,7 +4,7 @@ import SwiftUI
 
 @main
 struct LeadWhisperApp: App {
-    var sharedModelContainer: ModelContainer = {
+    let sharedModelContainer: ModelContainer = {
         let schema = Schema([
             Contact.self,
             Opportunity.self,

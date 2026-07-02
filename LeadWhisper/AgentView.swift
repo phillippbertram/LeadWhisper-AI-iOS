@@ -18,19 +18,14 @@ struct AgentComposerView: View {
     @State private var voiceInput = VoiceInputService()
     @State private var agentService = LeadAgentService()
     @State private var speechOutput = SpeechOutputService()
-    @State private var manualTranscript = ""
+    @State private var transcript = ""
+    @State private var isVoiceSession = false
+    @State private var analyzeTask: Task<Void, Never>?
     @State private var runResult: AgentRunResult?
     @State private var isProcessing = false
     @State private var statusMessage: String?
 
     var showTitle = true
-
-    private var currentTranscript: String {
-        if !voiceInput.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return voiceInput.transcript
-        }
-        return manualTranscript
-    }
 
     private var transcriptBeamConfiguration: BeamBorderConfiguration {
         BeamBorderConfiguration(
@@ -96,6 +91,16 @@ struct AgentComposerView: View {
                 }
             }
         }
+        .task {
+            agentService.prewarm()
+        }
+        .onChange(of: voiceInput.transcript) { _, newValue in
+            // Live recognition owns the transcript only during an active voice
+            // session. Manual edits flip the session off, so they are never
+            // clobbered by a late partial or final recognition result.
+            guard isVoiceSession else { return }
+            transcript = newValue
+        }
     }
 
     private var availabilityBanner: some View {
@@ -114,6 +119,7 @@ struct AgentComposerView: View {
                     if voiceInput.isRecording {
                         voiceInput.stopRecording()
                     } else {
+                        isVoiceSession = true
                         await voiceInput.startRecording()
                     }
                 }
@@ -125,8 +131,10 @@ struct AgentComposerView: View {
             .disabled(!voiceInput.canRecordAudio && !voiceInput.isRecording)
 
             Button {
+                analyzeTask?.cancel()
                 voiceInput.reset()
-                manualTranscript = ""
+                isVoiceSession = false
+                transcript = ""
                 runResult = nil
                 statusMessage = nil
             } label: {
@@ -149,12 +157,12 @@ struct AgentComposerView: View {
             }
 
             TextEditor(text: Binding(
-                get: { currentTranscript },
+                get: { transcript },
                 set: { newValue in
-                    manualTranscript = newValue
-                    if !voiceInput.transcript.isEmpty {
-                        voiceInput.transcript = newValue
-                    }
+                    transcript = newValue
+                    // A manual edit ends the voice session so recognition
+                    // updates stop overwriting what the user typed.
+                    isVoiceSession = false
                 }
             ))
             .frame(minHeight: 120)
@@ -168,37 +176,44 @@ struct AgentComposerView: View {
             .beamBorder(transcriptBeamConfiguration, isEnabled: !accessibilityReduceMotion)
 
             Button {
-                Task {
-                    await analyze()
-                }
+                analyzeTask?.cancel()
+                analyzeTask = Task { await analyze() }
             } label: {
                 Label("Prepare Changes", systemImage: "sparkles")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(currentTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isProcessing)
+            .disabled(transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isProcessing)
         }
     }
 
     private func analyze() async {
-        let transcript = currentTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !transcript.isEmpty else { return }
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
 
-        AppLog.agent.info("Agent analyze requested transcriptCharacters=\(transcript.count, privacy: .public)")
+        AppLog.agent.info("Agent analyze requested transcriptCharacters=\(trimmed.count, privacy: .public)")
         isProcessing = true
         statusMessage = nil
         defer { isProcessing = false }
 
         let repository = CRMRepository(context: modelContext)
-        runResult = await agentService.draft(for: transcript, repository: repository)
-        AppLog.agent.info("Agent analyze finished mockParser=\(runResult?.usedMockParser ?? false, privacy: .public) proposedChanges=\(runResult?.draft.proposedChanges.count ?? 0, privacy: .public)")
+        let result = await agentService.draft(for: trimmed, repository: repository)
+
+        // A newer run (or a reset) may have superseded this one while awaiting.
+        guard !Task.isCancelled else {
+            AppLog.agent.info("Agent analyze result discarded because the task was cancelled")
+            return
+        }
+
+        runResult = result
+        AppLog.agent.info("Agent analyze finished mockParser=\(result.usedMockParser, privacy: .public) proposedChanges=\(result.draft.proposedChanges.count, privacy: .public)")
     }
 
     private func saveDraft() {
         guard let draft = runResult?.draft else { return }
         do {
             let repository = CRMRepository(context: modelContext)
-            let result = try ChangeExecutor(repository: repository).apply(draft, transcript: currentTranscript)
+            let result = try ChangeExecutor(repository: repository).apply(draft, transcript: transcript)
             statusMessage = "Saved: \(result.changedTitles.joined(separator: ", "))"
             speechOutput.speak(result.spokenSummary)
             runResult = nil
@@ -217,24 +232,20 @@ struct AgentComposerView: View {
 
     private func selectClarification(_ option: String) {
         let answer = "Clarification answer: \(option)"
-        let transcript = currentTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        let updatedTranscript = transcript.isEmpty ? answer : "\(transcript)\n\(answer)"
-
-        manualTranscript = updatedTranscript
-        if !voiceInput.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            voiceInput.transcript = updatedTranscript
-        }
+        let base = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcript = base.isEmpty ? answer : "\(base)\n\(answer)"
+        isVoiceSession = false
         runResult = nil
         statusMessage = nil
 
-        Task {
-            await analyze()
-        }
+        analyzeTask?.cancel()
+        analyzeTask = Task { await analyze() }
     }
 
     private func loadSample() {
-        manualTranscript = "New contact: Sarah Klein from BluePeak. She needs help with a Flutter app in August. Budget around 20,000 Euro. Create an opportunity, set it to Qualified, and remind me on Friday to send a proposal."
-        voiceInput.transcript = ""
+        voiceInput.reset()
+        isVoiceSession = false
+        transcript = "New contact: Sarah Klein from BluePeak. She needs help with a Flutter app in August. Budget around 20,000 Euro. Create an opportunity, set it to Qualified, and remind me on Friday to send a proposal."
         runResult = nil
         statusMessage = nil
         AppLog.agent.debug("Agent sample transcript loaded")

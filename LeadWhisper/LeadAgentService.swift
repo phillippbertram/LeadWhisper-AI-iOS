@@ -35,6 +35,14 @@ final class LeadAgentService {
         Self.availabilityMessage(for: model.availability)
     }
 
+    /// Warms the shared on-device model ahead of the first request. Call this when
+    /// the agent UI appears so assets are loaded before the user submits a transcript.
+    func prewarm() {
+        guard model.isAvailable else { return }
+        LanguageModelSession(model: model).prewarm()
+        AppLog.agent.debug("SystemLanguageModel prewarm requested at UI appear")
+    }
+
     func draft(for transcript: String, repository: CRMRepository) async -> AgentRunResult {
         AppLog.agent.info("Agent draft requested transcriptCharacters=\(transcript.count, privacy: .public)")
 
@@ -84,14 +92,13 @@ final class LeadAgentService {
                 instructions: instructions(for: lookupMode)
             )
 
-            session.prewarm()
-            AppLog.agent.debug("LanguageModelSession prewarmed")
-
+            // Greedy sampling makes extraction deterministic; temperature has no
+            // effect under greedy, so it is intentionally omitted.
             let response = try await session.respond(
                 to: prompt(for: transcript),
                 generating: AgentDraft.self,
                 includeSchemaInPrompt: false,
-                options: GenerationOptions(sampling: .greedy, temperature: 0.1, maximumResponseTokens: 900)
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 900)
             )
 
             AppLog.agent.info("Foundation Models draft generated proposedChanges=\(response.content.proposedChanges.count, privacy: .public) facts=\(response.content.detectedFacts.count, privacy: .public) clarification=\(response.content.clarification == nil ? "none" : "present", privacy: .public)")

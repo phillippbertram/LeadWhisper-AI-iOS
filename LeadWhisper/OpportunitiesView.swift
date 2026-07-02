@@ -7,6 +7,7 @@ struct OpportunitiesView: View {
     @Query private var followUps: [FollowUpTask]
     @State private var sheet: OpportunitiesSheet?
     @State private var pendingDeleteOpportunity: Opportunity?
+    @State private var actionError: PresentableError?
 
     var body: some View {
         NavigationStack {
@@ -63,7 +64,7 @@ struct OpportunitiesView: View {
             ) {
                 Button("Delete Opportunity", role: .destructive) {
                     if let pendingDeleteOpportunity {
-                        try? CRMRepository(context: modelContext).deleteOpportunity(pendingDeleteOpportunity)
+                        perform { try $0.deleteOpportunity(pendingDeleteOpportunity) }
                     }
                     pendingDeleteOpportunity = nil
                 }
@@ -73,6 +74,15 @@ struct OpportunitiesView: View {
             } message: {
                 Text("Linked follow-ups are deleted. Interactions keep their history but are unlinked.")
             }
+            .crmErrorAlert($actionError)
+        }
+    }
+
+    private func perform(_ action: (CRMRepository) throws -> Void) {
+        do {
+            try action(CRMRepository(context: modelContext))
+        } catch {
+            actionError = PresentableError(error)
         }
     }
 }

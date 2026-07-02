@@ -39,10 +39,27 @@ enum VoiceRecordingCapability: Equatable, Sendable {
 final class VoiceInputService {
     nonisolated static let unavailableMessage = "Voice recording unavailable here. Type the transcript instead."
 
+    private enum RecordingState: Equatable {
+        case idle
+        case starting
+        case recording
+
+        var logLabel: String {
+            switch self {
+            case .idle: "idle"
+            case .starting: "starting"
+            case .recording: "recording"
+            }
+        }
+    }
+
     var transcript = ""
-    var isRecording = false
     var statusMessage: String
     var recordingCapability: VoiceRecordingCapability
+
+    private var state: RecordingState = .idle
+
+    var isRecording: Bool { state == .recording }
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) ?? SFSpeechRecognizer()
     private let audioEngine = AVAudioEngine()
@@ -76,7 +93,20 @@ final class VoiceInputService {
     }
 
     func startRecording() async {
-        guard !isRecording else { return }
+        guard state == .idle else {
+            AppLog.voice.debug("Voice recording start ignored state=\(self.state.logLabel, privacy: .public)")
+            return
+        }
+        state = .starting
+
+        // Any early exit below leaves the service idle again; only the success
+        // path flips this to true and locks in the .recording state.
+        var didStartRecording = false
+        defer {
+            if !didStartRecording, state == .starting {
+                state = .idle
+            }
+        }
 
         AppLog.voice.info("Voice recording start requested")
         refreshRecordingCapability()
@@ -113,7 +143,8 @@ final class VoiceInputService {
             try configureAudio()
             try validateAudioRoute()
             try startAudioRecognition()
-            isRecording = true
+            state = .recording
+            didStartRecording = true
             statusMessage = "Listening..."
             AppLog.voice.info("Voice recording started")
         } catch {
@@ -127,7 +158,7 @@ final class VoiceInputService {
     }
 
     func stopRecording() {
-        guard isRecording || audioEngine.isRunning || request != nil || task != nil || hasInstalledTap else { return }
+        guard state != .idle || audioEngine.isRunning || request != nil || task != nil || hasInstalledTap else { return }
         if audioEngine.isRunning {
             audioEngine.stop()
         }
@@ -139,9 +170,12 @@ final class VoiceInputService {
         task?.cancel()
         request = nil
         task = nil
-        isRecording = false
+        state = .idle
         statusMessage = transcript.isEmpty ? recordingCapability.message : "Transcript captured"
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Deactivating the audio session can block, so keep it off the main actor.
+        Task.detached {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
         AppLog.voice.info("Voice recording stopped transcriptCharacters=\(self.transcript.count, privacy: .public)")
     }
 

@@ -7,6 +7,7 @@ struct TodayView: View {
     @Query private var activity: [ActivityEvent]
     @State private var sheet: TodaySheet?
     @State private var pendingDeleteTask: FollowUpTask?
+    @State private var actionError: PresentableError?
 
     private var openFollowUps: [FollowUpTask] {
         followUps
@@ -40,14 +41,14 @@ struct TodayView: View {
                             FollowUpRow(task: task)
                                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
                                     Button {
-                                        try? CRMRepository(context: modelContext).markFollowUpDone(task)
+                                        perform { try $0.markFollowUpDone(task) }
                                     } label: {
                                         Label("Done", systemImage: "checkmark")
                                     }
                                     .tint(.green)
 
                                     Button {
-                                        try? CRMRepository(context: modelContext).archiveFollowUp(task)
+                                        perform { try $0.archiveFollowUp(task) }
                                     } label: {
                                         Label("Archive", systemImage: "archivebox")
                                     }
@@ -105,7 +106,7 @@ struct TodayView: View {
             ) {
                 Button("Delete Follow-up", role: .destructive) {
                     if let pendingDeleteTask {
-                        try? CRMRepository(context: modelContext).deleteFollowUp(pendingDeleteTask)
+                        perform { try $0.deleteFollowUp(pendingDeleteTask) }
                     }
                     pendingDeleteTask = nil
                 }
@@ -115,6 +116,15 @@ struct TodayView: View {
             } message: {
                 Text("This removes the task and writes an activity entry.")
             }
+            .crmErrorAlert($actionError)
+        }
+    }
+
+    private func perform(_ action: (CRMRepository) throws -> Void) {
+        do {
+            try action(CRMRepository(context: modelContext))
+        } catch {
+            actionError = PresentableError(error)
         }
     }
 }
