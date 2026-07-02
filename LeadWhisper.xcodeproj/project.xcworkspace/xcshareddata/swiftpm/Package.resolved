@@ -1,0 +1,15 @@
+{
+  "originHash" : "11ab30c7840a9636561e217e15e03998f146bec8d7e1c8a192876544f530aae8",
+  "pins" : [
+    {
+      "identity" : "beamborder",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/phillippbertram/BeamBorder.git",
+      "state" : {
+        "revision" : "8efb096e77c1a586fb323c063a227e725c0c561c",
+        "version" : "1.0.0"
+      }
+    }
+  ],
+  "version" : 3
+}
