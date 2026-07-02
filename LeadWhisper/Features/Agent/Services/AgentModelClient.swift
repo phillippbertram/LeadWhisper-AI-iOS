@@ -24,6 +24,19 @@ enum AgentProviderKind: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    var modelDisplayName: String {
+        switch self {
+        case .appleFoundationModels:
+            "Apple Foundation Models"
+        case .openAI:
+            "GPT 5.5"
+        }
+    }
+
+    var modelStatusLabel: String {
+        "\(statusLabel) model · \(modelDisplayName)"
+    }
+
     var privacySystemImage: String {
         switch self {
         case .appleFoundationModels:

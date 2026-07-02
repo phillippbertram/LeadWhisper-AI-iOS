@@ -117,7 +117,7 @@ enum ProposedChangeAction: String, CaseIterable, Codable, Sendable, Hashable {
 struct ClarificationPrompt: Codable, Sendable {
     var question: String
 
-    @Guide(.minimumCount(2), .maximumCount(4))
+    @Guide(.maximumCount(4))
     var options: [String]
 
     var allowsFreeText: Bool?
@@ -342,7 +342,6 @@ extension AgentTurn {
                 "question": .object(["type": .string("string")]),
                 "options": .object([
                     "type": .string("array"),
-                    "minItems": .number(2),
                     "maxItems": .number(4),
                     "items": .object(["type": .string("string")])
                 ]),

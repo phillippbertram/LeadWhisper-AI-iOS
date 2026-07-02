@@ -5,7 +5,6 @@ struct AgentResultView: View {
     var showsActions = true
     let save: (Set<String>) -> Void
     let cancel: () -> Void
-    let answerClarification: (String) -> Void
 
     @AppStorage(AgentSettings.debugModeKey) private var isDebugModeEnabled = false
     @State private var showsDetails = false
@@ -33,14 +32,15 @@ struct AgentResultView: View {
                     systemImage: "exclamationmark.triangle",
                     tint: .orange
                 )
-            } else if let message = runResult.message.nilIfBlank {
+            } else if let message = runResult.message.nilIfBlank,
+                      runResult.draft.clarification == nil {
                 Text(message)
                     .font(.subheadline)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if let clarification = runResult.draft.clarification {
-                ClarificationView(clarification: clarification, isEnabled: showsActions, select: answerClarification)
+                ClarificationPromptView(clarification: clarification)
             } else if !runResult.draft.proposedChanges.isEmpty {
                 ProposedChangesView(
                     changes: runResult.draft.proposedChanges,
@@ -471,85 +471,28 @@ private extension ProposedChangeAction {
     }
 }
 
-private struct ClarificationView: View {
+private struct ClarificationPromptView: View {
     let clarification: ClarificationPrompt
-    let isEnabled: Bool
-    let select: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "questionmark.bubble")
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.blue)
-                    .frame(width: 24)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(clarification.question)
-                        .font(.body.weight(.medium))
-                        .fixedSize(horizontal: false, vertical: true)
-                    if clarification.allowsFreeText == true {
-                        Text(clarification.placeholder?.nilIfBlank ?? "Type your answer below.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if !clarification.options.isEmpty {
-                ForEach(clarification.options, id: \.self) { option in
-                    Button {
-                        select(option)
-                    } label: {
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: iconName(for: option))
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.blue)
-                                .frame(width: 22)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(nil)
-                                    .multilineTextAlignment(.leading)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text("Use this answer")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "arrow.up.message")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 2)
-                        }
-                        .padding(14)
-                        .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(.blue.opacity(0.16))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!isEnabled)
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "questionmark.bubble")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.blue)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(clarification.question)
+                    .font(.body.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                if clarification.allowsFreeText == true {
+                    Text(clarification.placeholder?.nilIfBlank ?? "Type your answer below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    private func iconName(for option: String) -> String {
-        let key = option.searchKey
-        if key.contains("yes") || key.contains("no") || key.contains("unclear") {
-            return "checkmark.circle"
-        }
-        if key.contains("follow") || key.contains("task") {
-            return "bell"
-        }
-        if key.contains("opportunity") || key.contains("proposal") {
-            return "chart.line.uptrend.xyaxis"
-        }
-        return "person.crop.circle"
     }
 }

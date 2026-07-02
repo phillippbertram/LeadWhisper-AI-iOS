@@ -470,6 +470,7 @@ final class AgentConversationEngine {
         Return one AgentTurn with thought. Use only user/tool facts; never invent records, IDs, contact data, budgets, dates, or notes.
         Tools: \(toolScope.instructionHint) Keep lookups short; do not repeat them. If records are missing or ambiguous, ask one focused question.
         Kinds: reply=short answer; clarify=one question, no changes; propose=reviewable changes.
+        Clarifications: use options only for concrete tappable answers such as found record names or yes/no choices. For free-text details, use options=[] with allowsFreeText=true and a helpful placeholder; never put instructions like "provide contact name" in options.
         Before propose: createContact needs contactName+company; createOpportunity needs opportunityTitle+contactName/company; createFollowUp needs followUpTitle+contact/opportunity, dueDateText if given. Updates, completions, and deletes need one found local record with targetID=UUID.
         Stages: lead, qualified, proposalNeeded, proposalSent, won, lost. Follow-ups: open, done, archived.
         """

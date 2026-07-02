@@ -8,6 +8,12 @@ struct AgentComposerView: View {
         static let bottomAnchor = "agent-bottom-anchor"
     }
 
+    private enum EntryElement {
+        case content
+        case toolbar
+        case inputBar
+    }
+
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @AppStorage(AgentSettings.providerKindKey) private var selectedProviderRawValue = AgentProviderKind.appleFoundationModels.rawValue
     @FocusState private var isInputFocused: Bool
@@ -25,6 +31,7 @@ struct AgentComposerView: View {
     @State private var isProcessing = false
     @State private var showsPrivacyInfo = false
     @State private var actionError: PresentableError?
+    @State private var hasShownEntryAnimation = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -41,8 +48,7 @@ struct AgentComposerView: View {
                             message: message,
                             activeResultID: activeResultID,
                             save: saveDraft,
-                            cancel: cancelDraft,
-                            answerClarification: submit
+                            cancel: cancelDraft
                         )
                         .id(message.id)
                     }
@@ -63,30 +69,50 @@ struct AgentComposerView: View {
             .contentShape(Rectangle())
             .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
             .scrollDismissesKeyboard(.interactively)
+            .opacity(entryOpacity)
+            .offset(y: entryOffset(for: .content))
+            .animation(entryAnimation(delay: 0), value: hasShownEntryAnimation)
             .safeAreaInset(edge: .bottom) {
-                AgentInputBar(
-                    text: $draftText,
-                    isInputFocused: $isInputFocused,
-                    isRecording: voiceInput.isRecording,
-                    canRecord: voiceInput.canRecordAudio,
-                    statusMessage: voiceInput.statusMessage,
-                    isProcessing: isProcessing,
-                    accessibilityReduceMotion: accessibilityReduceMotion,
-                    contextUsage: engine.contextWindowUsage,
-                    contextEvent: engine.contextWindowEvent,
-                    providerStatusMessage: providerStatusMessage,
-                    send: { submitDraftText() },
-                    toggleRecording: toggleRecording
-                )
+                VStack(alignment: .leading, spacing: 8) {
+                    if !activeClarificationOptions.isEmpty {
+                        ClarificationActionBar(
+                            options: activeClarificationOptions,
+                            isEnabled: !isProcessing,
+                            select: submit
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+
+                    AgentInputBar(
+                        text: $draftText,
+                        isInputFocused: $isInputFocused,
+                        placeholder: inputPlaceholder,
+                        isRecording: voiceInput.isRecording,
+                        canRecord: voiceInput.canRecordAudio,
+                        statusMessage: voiceInput.statusMessage,
+                        isProcessing: isProcessing,
+                        accessibilityReduceMotion: accessibilityReduceMotion,
+                        contextUsage: engine.contextWindowUsage,
+                        contextEvent: engine.contextWindowEvent,
+                        providerStatusMessage: providerStatusMessage,
+                        send: { submitDraftText() },
+                        toggleRecording: toggleRecording
+                    )
+                }
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
                 .padding(.bottom, 10)
                 .background(.ultraThinMaterial)
+                .opacity(entryOpacity)
+                .offset(y: entryOffset(for: .inputBar))
+                .animation(entryAnimation(delay: 0.12), value: hasShownEntryAnimation)
+                .animation(.snappy(duration: 0.18), value: activeClarificationOptions)
             }
             .onAppear {
                 refreshSuggestions()
                 engine.refreshContextWindowUsage(for: draftText)
                 scrollToBottom(proxy)
+                showEntryAnimation()
             }
             .onChange(of: draftText) { _, newValue in
                 engine.refreshContextWindowUsage(for: newValue, debounce: true)
@@ -125,6 +151,9 @@ struct AgentComposerView: View {
                 } label: {
                     Label("Privacy", systemImage: "lock.shield")
                 }
+                .opacity(entryOpacity)
+                .offset(y: entryOffset(for: .toolbar))
+                .animation(entryAnimation(delay: 0.07), value: hasShownEntryAnimation)
                 .popover(isPresented: $showsPrivacyInfo) {
                     AgentPrivacyPopover(providerKind: selectedProviderKind, availabilityMessage: engine.availabilityMessage)
                 }
@@ -136,6 +165,9 @@ struct AgentComposerView: View {
                     Label("Reset", systemImage: "arrow.counterclockwise")
                 }
                 .disabled(!canResetConversation)
+                .opacity(entryOpacity)
+                .offset(y: entryOffset(for: .toolbar))
+                .animation(entryAnimation(delay: 0.07), value: hasShownEntryAnimation)
             }
         }
         .task {
@@ -144,6 +176,9 @@ struct AgentComposerView: View {
         .onChange(of: voiceInput.transcript) { _, newValue in
             guard isVoiceSession else { return }
             draftText = newValue
+        }
+        .onDisappear {
+            resetEntryAnimation()
         }
     }
 
@@ -159,11 +194,116 @@ struct AgentComposerView: View {
     }
 
     private var providerStatusMessage: String {
-        switch selectedProviderKind {
-        case .appleFoundationModels:
-            "Apple on-device model"
-        case .openAI:
-            "OpenAI cloud model"
+        selectedProviderKind.modelStatusLabel
+    }
+
+    private var activeClarification: ClarificationPrompt? {
+        guard let activeResultID else { return nil }
+        return messages.compactMap { message -> ClarificationPrompt? in
+            guard case .result(let runResult, _) = message.content,
+                  runResult.id == activeResultID else {
+                return nil
+            }
+            return runResult.draft.clarification
+        }
+        .first
+    }
+
+    private var activeClarificationOptions: [String] {
+        guard let activeClarification else { return [] }
+
+        var seenKeys = Set<String>()
+        return activeClarification.options.compactMap { option in
+            let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = trimmed.searchKey
+            guard !trimmed.isEmpty,
+                  !isFreeTextClarificationOption(key),
+                  seenKeys.insert(key).inserted else {
+                return nil
+            }
+            return trimmed
+        }
+    }
+
+    private var inputPlaceholder: String {
+        guard let activeClarification else {
+            return "Tell me what changed with a lead..."
+        }
+
+        if let placeholder = activeClarification.placeholder?.nilIfBlank {
+            return placeholder
+        }
+        if activeClarification.allowsFreeText == true {
+            return "Type your answer..."
+        }
+        return "Tell me what changed with a lead..."
+    }
+
+    private var entryOpacity: Double {
+        accessibilityReduceMotion || hasShownEntryAnimation ? 1 : 0
+    }
+
+    private func entryOffset(for element: EntryElement) -> CGFloat {
+        guard !accessibilityReduceMotion, !hasShownEntryAnimation else { return 0 }
+
+        switch element {
+        case .content:
+            return 6
+        case .toolbar:
+            return -2
+        case .inputBar:
+            return 10
+        }
+    }
+
+    private func entryAnimation(delay: Double) -> Animation? {
+        guard !accessibilityReduceMotion else { return nil }
+        return .easeOut(duration: 0.24).delay(delay)
+    }
+
+    private func showEntryAnimation() {
+        hasShownEntryAnimation = true
+    }
+
+    private func resetEntryAnimation() {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            hasShownEntryAnimation = false
+        }
+    }
+
+    private func isFreeTextClarificationOption(_ key: String) -> Bool {
+        let exactMatches = [
+            "other",
+            "something else",
+            "not listed",
+            "none of these",
+            "none of the above",
+            "type it",
+            "type your answer",
+            "write answer",
+            "custom answer",
+            "free text"
+        ]
+        if exactMatches.contains(key) {
+            return true
+        }
+
+        return [
+            "provide",
+            "enter",
+            "type",
+            "write",
+            "specify",
+            "add detail",
+            "add details",
+            "fill in",
+            "tell me",
+            "share",
+            "give"
+        ].contains { prefix in
+            key == prefix || key.hasPrefix("\(prefix) ")
         }
     }
 
@@ -379,7 +519,6 @@ private struct AgentMessageRow: View {
     let activeResultID: UUID?
     let save: (AgentRunResult, String, Set<String>) -> Void
     let cancel: (AgentRunResult) -> Void
-    let answerClarification: (String) -> Void
 
     var body: some View {
         switch message.content {
@@ -395,8 +534,7 @@ private struct AgentMessageRow: View {
                 transcript: transcript,
                 isActive: runResult.id == activeResultID,
                 save: save,
-                cancel: cancel,
-                answerClarification: answerClarification
+                cancel: cancel
             )
 
         case .receipt(let changedTitles):
@@ -462,7 +600,6 @@ private struct AgentResultBubble: View {
     let isActive: Bool
     let save: (AgentRunResult, String, Set<String>) -> Void
     let cancel: (AgentRunResult) -> Void
-    let answerClarification: (String) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -471,8 +608,7 @@ private struct AgentResultBubble: View {
                 runResult: runResult,
                 showsActions: isActive,
                 save: { selectedChangeIDs in save(runResult, transcript, selectedChangeIDs) },
-                cancel: { cancel(runResult) },
-                answerClarification: answerClarification
+                cancel: { cancel(runResult) }
             )
             .padding(12)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -608,9 +744,71 @@ private struct TypingDots: View {
     }
 }
 
+private struct ClarificationActionBar: View {
+    let options: [String]
+    let isEnabled: Bool
+    let select: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    select(option)
+                } label: {
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: iconName(for: option))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.blue)
+                            .frame(width: 22)
+
+                        Text(option)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Spacer(minLength: 8)
+
+                        Image(systemName: "arrow.up.message")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(.blue.opacity(0.16))
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!isEnabled)
+                .accessibilityLabel("Answer \(option)")
+            }
+        }
+    }
+
+    private func iconName(for option: String) -> String {
+        let key = option.searchKey
+        if key.contains("yes") || key.contains("no") || key.contains("unclear") {
+            return "checkmark.circle"
+        }
+        if key.contains("follow") || key.contains("task") {
+            return "bell"
+        }
+        if key.contains("opportunity") || key.contains("proposal") {
+            return "chart.line.uptrend.xyaxis"
+        }
+        return "person.crop.circle"
+    }
+}
+
 private struct AgentInputBar: View {
     @Binding var text: String
     let isInputFocused: FocusState<Bool>.Binding
+    let placeholder: String
     let isRecording: Bool
     let canRecord: Bool
     let statusMessage: String
@@ -642,7 +840,7 @@ private struct AgentInputBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            TextField("Tell me what changed with a lead...", text: $text, axis: .vertical)
+            TextField(placeholder, text: $text, axis: .vertical)
                 .focused(isInputFocused)
                 .font(.body)
                 .lineLimit(1...5)
@@ -705,7 +903,8 @@ private struct AgentInputBar: View {
         if isRecording {
             return "Listening..."
         }
-        if statusMessage.nilIfBlank == nil {
+        guard let statusMessage = statusMessage.nilIfBlank,
+              statusMessage != VoiceInputService.temporarilyDisabledMessage else {
             return providerStatusMessage
         }
         return "\(providerStatusMessage) - \(statusMessage)"

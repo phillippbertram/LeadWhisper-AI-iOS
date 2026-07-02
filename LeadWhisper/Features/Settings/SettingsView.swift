@@ -22,6 +22,10 @@ struct SettingsView: View {
         contacts.count + opportunities.count + followUps.count + interactions.count + activityEvents.count
     }
 
+    private var selectedProviderKind: AgentProviderKind {
+        AgentProviderKind(rawValue: selectedProviderRawValue) ?? .appleFoundationModels
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -40,13 +44,15 @@ struct SettingsView: View {
                         }
                     }
 
+                    LabeledContent("Model", value: selectedProviderKind.modelDisplayName)
+
                     Toggle(isOn: $isAgentDebugModeEnabled) {
                         Label("Show Agent Reasoning", systemImage: "brain")
                     }
                 } header: {
                     Text("Agent")
                 } footer: {
-                    Text("Choose whether the agent uses Apple's on-device model or sends submitted agent messages and local lookup results to OpenAI. Debug mode expands the ReAct trace on every result card.")
+                    Text("Choose the provider and model used for agent turns. OpenAI sends submitted agent messages and local lookup results to OpenAI. Debug mode expands the ReAct trace on every result card.")
                 }
 
                 Section {
