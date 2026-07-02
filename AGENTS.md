@@ -63,6 +63,8 @@ Use the repo-local skills as focused playbooks:
   behavior end to end.
 - [SwiftUI](.agents/skills/swiftui.md): view composition, state, sheets,
   queries, errors, previews, and accessibility.
+- [Dependency Injection](.agents/skills/dependency-injection.md): FactoryKit
+  container wiring, overrides, dependency boundaries, and testable services.
 - [Agent CRM](.agents/skills/agent-crm.md): Foundation Models, CRM draft schema,
   lookup tools, fallback parser, and safe application.
 - [Commits](.agents/skills/commits.md): staging, commit messages, and handoff
