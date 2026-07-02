@@ -49,7 +49,7 @@ struct FindContactsTool: Tool {
 
     var name: String { "findContacts" }
     var description: String {
-        "Search existing local CRM contacts by name, company, notes, or tags. This tool is read-only."
+        "Search existing local CRM contacts by combined fuzzy name, company, notes, or tags. This tool is read-only."
     }
 
     @concurrent
@@ -71,7 +71,7 @@ struct FindOpportunitiesTool: Tool {
 
     var name: String { "findOpportunities" }
     var description: String {
-        "Search existing local CRM opportunities by title, company, stage, budget, or tags. This tool is read-only."
+        "Search existing local CRM opportunities by combined fuzzy title, company, stage, budget, notes, or tags. This tool is read-only."
     }
 
     @concurrent
@@ -147,7 +147,7 @@ struct FindFollowUpsTool: Tool {
 
     var name: String { "findFollowUps" }
     var description: String {
-        "Search existing local CRM follow-up tasks by title, due date text, notes, or state. This tool is read-only."
+        "Search existing local CRM follow-up tasks by combined fuzzy title, due date text, notes, state, contact, or opportunity. This tool is read-only."
     }
 
     @concurrent

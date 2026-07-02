@@ -48,17 +48,18 @@ final class CRMRepository: ObservableObject {
         let key = query.searchKey
         guard !key.isEmpty, limit > 0 else { return [] }
 
-        return try contacts()
-            .filter { contact in
-                contact.fullName.searchKey.contains(key) ||
-                    contact.company.searchKey.contains(key) ||
-                    contact.role.searchKey.contains(key) ||
-                    contact.email.searchKey.contains(key) ||
-                    contact.phone.searchKey.contains(key) ||
-                    contact.notes.searchKey.contains(key) ||
-                    contact.tags.contains { $0.searchKey.contains(key) }
-            }
-            .prefix(limit)
+        return try Self.search(contacts(), matching: key, limit: limit) { contact in
+            var fields: [SearchField] = [
+                .primary(contact.fullName),
+                .primary(contact.company),
+                .secondary(contact.role),
+                .secondary(contact.email),
+                .secondary(contact.phone),
+                .secondary(contact.notes)
+            ]
+            fields.append(contentsOf: contact.tags.map(SearchField.secondary))
+            return fields
+        }
             .map(Self.snapshot(for:))
     }
 
@@ -66,15 +67,18 @@ final class CRMRepository: ObservableObject {
         let key = query.searchKey
         guard !key.isEmpty, limit > 0 else { return [] }
 
-        return try opportunities()
-            .filter { opportunity in
-                opportunity.title.searchKey.contains(key) ||
-                    opportunity.company.searchKey.contains(key) ||
-                    opportunity.stage.rawValue.searchKey.contains(key) ||
-                    opportunity.budgetText.searchKey.contains(key) ||
-                    opportunity.tags.contains { $0.searchKey.contains(key) }
-            }
-            .prefix(limit)
+        return try Self.search(opportunities(), matching: key, limit: limit) { opportunity in
+            var fields: [SearchField] = [
+                .primary(opportunity.title),
+                .primary(opportunity.company),
+                .secondary(opportunity.stage.rawValue),
+                .secondary(opportunity.budgetText),
+                .secondary(opportunity.expectedStart),
+                .secondary(opportunity.notes)
+            ]
+            fields.append(contentsOf: opportunity.tags.map(SearchField.secondary))
+            return fields
+        }
             .map(Self.snapshot(for:))
     }
 
@@ -82,15 +86,129 @@ final class CRMRepository: ObservableObject {
         let key = query.searchKey
         guard !key.isEmpty, limit > 0 else { return [] }
 
-        return try followUps()
-            .filter { followUp in
-                followUp.title.searchKey.contains(key) ||
-                    followUp.dueDateText.searchKey.contains(key) ||
-                    followUp.notes.searchKey.contains(key) ||
-                    followUp.state.rawValue.searchKey.contains(key)
+        return try Self.search(followUps(), matching: key, limit: limit) { followUp in
+            [
+                .primary(followUp.title),
+                .secondary(followUp.dueDateText),
+                .secondary(followUp.notes),
+                .secondary(followUp.state.rawValue),
+                .secondary(followUp.contact?.fullName ?? ""),
+                .secondary(followUp.contact?.company ?? ""),
+                .secondary(followUp.opportunity?.title ?? ""),
+                .secondary(followUp.opportunity?.company ?? "")
+            ]
+        }
+            .map(Self.snapshot(for:))
+    }
+
+    private static func search<T>(
+        _ records: [T],
+        matching key: String,
+        limit: Int,
+        fields: (T) -> [SearchField]
+    ) -> [T] {
+        let tokens = queryTokens(from: key)
+        guard !tokens.isEmpty || (key.count >= 3 && !SearchField.noiseWords.contains(key)) else { return [] }
+
+        return records.enumerated()
+            .compactMap { offset, record -> SearchCandidate<T>? in
+                guard let match = searchMatch(for: key, tokens: tokens, fields: fields(record)) else { return nil }
+                return SearchCandidate(record: record, match: match, offset: offset)
+            }
+            .sorted { lhs, rhs in
+                if lhs.match.rank != rhs.match.rank {
+                    return lhs.match.rank > rhs.match.rank
+                }
+                if lhs.match.score != rhs.match.score {
+                    return lhs.match.score > rhs.match.score
+                }
+                return lhs.offset < rhs.offset
             }
             .prefix(limit)
-            .map(Self.snapshot(for:))
+            .map(\.record)
+    }
+
+    private static func searchMatch(for key: String, tokens: [String], fields: [SearchField]) -> SearchMatch? {
+        let searchableFields = fields
+            .map { field in (key: field.value.searchKey, weight: field.weight) }
+            .filter { !$0.key.isEmpty }
+        guard !searchableFields.isEmpty else { return nil }
+
+        let combinedKey = searchableFields.map(\.key).joined(separator: " ")
+        if combinedKey.contains(key) {
+            let fieldWeight = searchableFields
+                .filter { $0.key.contains(key) }
+                .map(\.weight)
+                .max() ?? 0
+            return SearchMatch(rank: 3, score: 10_000 + fieldWeight + key.count)
+        }
+
+        if !tokens.isEmpty {
+            var tokenScore = 0
+            for token in tokens {
+                let bestFieldScore = searchableFields
+                    .filter { $0.key.contains(token) }
+                    .map(\.weight)
+                    .max()
+                guard let bestFieldScore else {
+                    tokenScore = 0
+                    break
+                }
+                tokenScore += bestFieldScore + token.count
+            }
+            if tokenScore > 0 {
+                return SearchMatch(rank: 2, score: 6_000 + tokenScore)
+            }
+        }
+
+        let compactQuery = key.compactSearchKey
+        guard compactQuery.count >= 5 else { return nil }
+
+        let fuzzyScore = fuzzySubsequenceScore(query: compactQuery, candidate: combinedKey.compactSearchKey)
+        guard fuzzyScore >= fuzzyThreshold(for: compactQuery) else { return nil }
+        return SearchMatch(rank: 1, score: 3_000 + fuzzyScore)
+    }
+
+    private static func queryTokens(from key: String) -> [String] {
+        var seen: Set<String> = []
+        var tokens: [String] = []
+
+        for part in key.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+            let token = String(part)
+            guard token.count > 1, !SearchField.noiseWords.contains(token), !seen.contains(token) else {
+                continue
+            }
+            seen.insert(token)
+            tokens.append(token)
+        }
+
+        return tokens
+    }
+
+    private static func fuzzySubsequenceScore(query: String, candidate: String) -> Int {
+        let queryCharacters = Array(query)
+        guard !queryCharacters.isEmpty else { return 0 }
+
+        var queryIndex = 0
+        var currentRun = 0
+        var score = 0
+
+        for candidateCharacter in candidate {
+            guard queryIndex < queryCharacters.count else { break }
+            if candidateCharacter == queryCharacters[queryIndex] {
+                queryIndex += 1
+                currentRun += 1
+                score += currentRun
+            } else {
+                currentRun = 0
+            }
+        }
+
+        return queryIndex == queryCharacters.count ? score : 0
+    }
+
+    private static func fuzzyThreshold(for query: String) -> Int {
+        query.count + max(4, query.count / 2)
     }
 
     func contact(id string: String?) throws -> Contact? {
@@ -325,5 +443,40 @@ final class CRMRepository: ObservableObject {
             notes: followUp.notes,
             state: followUp.state.rawValue
         )
+    }
+}
+
+private struct SearchField {
+    static let noiseWords: Set<String> = [
+        "am", "an", "and", "at", "bei", "das", "der", "die", "for", "fur",
+        "im", "in", "mit", "of", "on", "the", "to", "und", "von", "with", "zu"
+    ]
+
+    let value: String
+    let weight: Int
+
+    static func primary(_ value: String) -> SearchField {
+        SearchField(value: value, weight: 120)
+    }
+
+    static func secondary(_ value: String) -> SearchField {
+        SearchField(value: value, weight: 60)
+    }
+}
+
+private struct SearchMatch {
+    let rank: Int
+    let score: Int
+}
+
+private struct SearchCandidate<T> {
+    let record: T
+    let match: SearchMatch
+    let offset: Int
+}
+
+private extension String {
+    var compactSearchKey: String {
+        searchKey.filter { $0.isLetter || $0.isNumber }
     }
 }
