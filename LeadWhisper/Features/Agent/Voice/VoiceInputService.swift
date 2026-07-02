@@ -9,6 +9,8 @@ import Speech
 @MainActor
 @Observable
 final class VoiceInputService {
+    nonisolated static let isTemporarilyDisabled = true
+    nonisolated static let temporarilyDisabledMessage = "Voice input is temporarily disabled. Type the transcript instead."
     nonisolated static let unavailableMessage = "Voice recording unavailable here. Type the transcript instead."
 
     private enum RecordingState: Equatable {
@@ -226,6 +228,10 @@ final class VoiceInputService {
 
     /// Full capability check including transcriber availability.
     private func currentRecordingCapability() -> VoiceRecordingCapability {
+        guard !Self.isTemporarilyDisabled else {
+            return .unavailable(Self.temporarilyDisabledMessage)
+        }
+
         #if targetEnvironment(simulator)
         return .unavailable(Self.unavailableMessage)
         #else

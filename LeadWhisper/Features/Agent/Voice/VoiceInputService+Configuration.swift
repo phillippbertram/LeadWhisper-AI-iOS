@@ -8,8 +8,12 @@ extension VoiceInputService {
     /// Recognizer availability is verified in `refreshRecordingCapability()`
     /// when recording actually starts.
     static func defaultRecordingCapability() -> VoiceRecordingCapability {
+        guard !isTemporarilyDisabled else {
+            return .unavailable(temporarilyDisabledMessage)
+        }
+
         #if targetEnvironment(simulator)
-        .unavailable(unavailableMessage)
+        return .unavailable(unavailableMessage)
         #else
         if let configurationError = speechRecognitionConfigurationError() {
             return .unavailable(configurationError.errorDescription ?? unavailableMessage)

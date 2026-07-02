@@ -61,7 +61,7 @@ struct OpportunitiesView: View {
                 Button {
                     sheet = .agent
                 } label: {
-                    Label("Talk", systemImage: "mic.fill")
+                    Label("Type Update", systemImage: "keyboard")
                 }
             }
         } else {

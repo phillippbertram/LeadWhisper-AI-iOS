@@ -617,9 +617,9 @@ private struct AgentInputBar: View {
             HStack(alignment: .center, spacing: 8) {
                 ComposerIconButton(
                     systemImage: isRecording ? "stop.fill" : canRecord ? "mic.fill" : "mic.slash.fill",
-                    tint: isRecording ? .red : .blue,
+                    tint: isRecording ? .red : canRecord ? .blue : .secondary,
                     isEnabled: canRecord || isRecording,
-                    accessibilityLabel: isRecording ? "Stop recording" : "Start recording",
+                    accessibilityLabel: isRecording ? "Stop recording" : canRecord ? "Start recording" : "Voice input unavailable",
                     action: toggleRecording
                 )
 

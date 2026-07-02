@@ -7,7 +7,7 @@ struct TalkFloatingButton: View {
         Button {
             open()
         } label: {
-            Label("Talk", systemImage: "mic.fill")
+            Label("Agent", systemImage: "keyboard")
                 .font(.headline.weight(.semibold))
                 .lineLimit(1)
                 .padding(.horizontal, 18)
@@ -15,7 +15,7 @@ struct TalkFloatingButton: View {
         }
         .buttonStyle(.glassProminent)
         .controlSize(.large)
-        .accessibilityLabel("Talk to LeadWhisper")
+        .accessibilityLabel("Open LeadWhisper agent")
     }
 }
 
