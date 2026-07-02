@@ -21,7 +21,7 @@ Factory in LeadWhisper.
 ## Injection Boundaries
 
 - Prefer explicit initializer injection inside services, tools, executors, and
-  reusable views. This keeps behavior testable without global lookups.
+  reusable views. This keeps behavior easy to verify without global lookups.
 - Resolve `Container.shared` at composition boundaries: app startup, feature view
   state creation, or short UI actions that need a configured service.
 - Do not pass `Container` into domain types or service methods. Pass the concrete
@@ -39,27 +39,24 @@ Factory in LeadWhisper.
 3. Reuse existing factories for shared inputs instead of constructing parallel
    instances.
 4. Resolve the factory at the nearest composition boundary.
-5. Add or update tests that override the factory and prove the consumer uses the
-   override.
+5. Do not add or update tests unless the user explicitly asks for test work.
 
-## Tests
+## Optional Verification
 
-- Use `FactoryTesting` and `@Suite(.container)` for tests that override
-  `Container.shared` registrations.
-- Override `modelContainer` with `makeTestModelContainer()` and build one
-  `CRMRepository` from that test context.
-- Register related dependencies against the same repository so the test graph is
+- Existing Factory tests may be run as confidence checks when available, but new
+  tests are not required.
+- If the user asks for test work, use `FactoryTesting` and `@Suite(.container)`
+  for overrides of `Container.shared` registrations.
+- For requested tests, override `modelContainer` with
+  `makeTestModelContainer()` and build one `CRMRepository` from that context.
+- Register related dependencies against the same repository so the graph is
   coherent.
-- Assert through user-visible behavior or repository effects, not just through
-  factory identity checks.
-- Keep overrides local to the test suite. Do not rely on state leaked from a
-  previous test.
 
 ## Review Checklist
 
-- A new service can be constructed directly in tests without touching Factory.
+- A new service can be constructed directly without touching Factory.
 - `Container.shared` lookups are limited to composition boundaries.
 - SwiftData-backed dependencies are `@MainActor` and share the intended
   `ModelContainer`.
-- Singleton usage is deliberate and does not hide stale UI or test state.
+- Singleton usage is deliberate and does not hide stale UI or stale state.
 - No private CRM content is introduced into logs while wiring dependencies.

@@ -8,11 +8,11 @@ Load only the files that fit the current task:
 
 - [Code Style](code-style.md): use for any Swift source change or review.
 - [Feature Work](feature-work.md): use for product behavior, data model,
-  repository, service, or test changes.
+  repository, or service changes.
 - [SwiftUI](swiftui.md): use for UI, navigation, sheets, state, previews, and
   accessibility changes.
 - [Dependency Injection](dependency-injection.md): use for FactoryKit container
-  wiring, overrides, dependency boundaries, and testable services.
+  wiring, overrides, dependency boundaries, and injectable services.
 - [Agent CRM](agent-crm.md): use for Foundation Models, agent tools, parser,
   draft schema, or CRM mutation flow changes.
 - [Commits](commits.md): use before staging, committing, or preparing a handoff.

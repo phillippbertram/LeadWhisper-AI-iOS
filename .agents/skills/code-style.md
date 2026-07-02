@@ -24,7 +24,8 @@ Use this skill for Swift implementation, review, or refactor work.
 - Preserve model timestamps when changing persisted data: update `updatedAt`
   when a model is materially edited.
 - Keep relationships and delete rules explicit. If a model relationship changes,
-  update repository behavior, seed data, and tests together.
+  update repository behavior and seed data together. Update tests only when the
+  user explicitly asks for test work.
 - Predicate limitations are real in this codebase. Follow existing raw-value
   patterns such as enum raw strings for `#Predicate` filters.
 

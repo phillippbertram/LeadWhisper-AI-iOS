@@ -1,7 +1,6 @@
 # Feature Work
 
-Use this skill when changing product behavior across models, services, views, or
-tests.
+Use this skill when changing product behavior across models, services, or views.
 
 ## Product Invariants
 
@@ -13,8 +12,10 @@ tests.
   typed transcripts and deterministic demo parsing should keep the core workflow
   testable.
 - Avoid hidden destructive behavior. Deletes, resets, archives, and stage changes
-  need clear UI affordances, confirmation where appropriate, activity entries,
-  and tests.
+  need clear UI affordances, confirmation where appropriate, and activity
+  entries.
+- Do not write, update, or maintain tests unless the user explicitly asks for
+  test work.
 
 ## Implementation Path
 
@@ -25,13 +26,12 @@ tests.
 - Update UI last, following the existing feature folder and edit-draft patterns.
 - Extend demo seed data or the demo parser when a new feature needs a reliable
   simulator/demo path.
-- Add tests for the behavior boundary, not just the helper function. Prefer
-  in-memory SwiftData containers from `LeadWhisperTests/TestSupport`.
 
 ## Data Changes
 
 - If a SwiftData schema changes, update all schemas that list model types:
-  app container, previews, and test containers.
+  app container and previews. Update test containers only when the user
+  explicitly asks for test maintenance.
 - The current app can recreate demo-oriented local storage after incompatible
   schema changes. Do not use that as a substitute for thinking through user data
   impact if the product scope changes.
@@ -46,9 +46,9 @@ tests.
 - Prefer small feature-local views for rows and sections before extracting shared
   UI.
 
-## Tests
+## Optional Verification
 
-- Repository/model changes need SwiftData tests.
-- Agent draft changes need parser, lookup, and executor coverage as relevant.
-- Date parsing, matching, and ambiguity handling deserve focused tests because
-  small regressions can produce incorrect CRM changes.
+- Existing tests may be run as confidence checks when the environment supports
+  them, but they are not required.
+- If a change is risky, describe useful follow-up test coverage in the handoff
+  instead of writing it.

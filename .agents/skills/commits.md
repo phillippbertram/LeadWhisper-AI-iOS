@@ -33,7 +33,7 @@ Always include a short English body. It should cover:
 
 - What changed.
 - Why it changed.
-- Tests or checks run.
+- Checks run. Mention tests only if optional tests were run.
 - Any known limitation caused by local environment.
 
 Example:
@@ -47,8 +47,8 @@ future agents can work consistently across Codex and Claude.
 
 ## Handoff Discipline
 
-- Mention tests or checks in the final message, including docs-only decisions
-  where no build was needed.
+- Mention checks in the final message, including docs-only decisions where no
+  build was needed. Say when tests were not run or not required.
 - Call out pre-existing modified files that were intentionally left untouched.
 - If a build or test fails because of simulator, Xcode cache, signing, or
   sandbox restrictions, report the exact category instead of hiding it.
