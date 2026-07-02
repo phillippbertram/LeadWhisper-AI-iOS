@@ -3,15 +3,16 @@ import OSLog
 import Speech
 
 extension VoiceInputService {
+    /// Cheap baseline check safe to run during view construction: it reads the
+    /// Info.plist configuration but does not allocate speech-service connections.
+    /// Recognizer availability is verified in `refreshRecordingCapability()`
+    /// when recording actually starts.
     static func defaultRecordingCapability() -> VoiceRecordingCapability {
         #if targetEnvironment(simulator)
         .unavailable(unavailableMessage)
         #else
         if let configurationError = speechRecognitionConfigurationError() {
             return .unavailable(configurationError.errorDescription ?? unavailableMessage)
-        }
-        if SFSpeechRecognizer(locale: Locale(identifier: "en-US")) == nil, SFSpeechRecognizer() == nil {
-            return .unavailable("Speech recognition is unavailable. Type the transcript instead.")
         }
         return .supported
         #endif
@@ -53,7 +54,7 @@ extension VoiceInputService {
         }
     }
 
-    private static func speechRecognitionConfigurationError() -> VoiceInputError? {
+    static func speechRecognitionConfigurationError() -> VoiceInputError? {
         guard hasUsageDescription("NSSpeechRecognitionUsageDescription") else {
             return .missingUsageDescription("NSSpeechRecognitionUsageDescription")
         }

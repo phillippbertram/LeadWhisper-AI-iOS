@@ -31,11 +31,22 @@ final class VoiceInputService {
 
     var isRecording: Bool { state == .recording }
 
-    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) ?? SFSpeechRecognizer()
-    private let audioEngine = AVAudioEngine()
+    // Speech recognizer and audio engine each open XPC connections to system
+    // services; allocating them lazily keeps view construction from stalling
+    // the main thread when the composer first appears.
+    @ObservationIgnored
+    private lazy var recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) ?? SFSpeechRecognizer()
+    @ObservationIgnored
+    private lazy var audioEngine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var hasInstalledTap = false
+
+    /// True while any audio or recognition resources are live, without touching
+    /// the lazy audio engine (so an early stop never allocates it).
+    private var hasActiveAudioWork: Bool {
+        state != .idle || request != nil || task != nil || hasInstalledTap
+    }
 
     init(recordingCapability: VoiceRecordingCapability? = nil) {
         let capability = recordingCapability ?? Self.defaultRecordingCapability()
@@ -110,7 +121,7 @@ final class VoiceInputService {
         }
 
         do {
-            try configureAudio()
+            try await Self.activateAudioSession()
             try validateAudioRoute()
             try startAudioRecognition()
             state = .recording
@@ -128,7 +139,7 @@ final class VoiceInputService {
     }
 
     func stopRecording() {
-        guard state != .idle || audioEngine.isRunning || request != nil || task != nil || hasInstalledTap else { return }
+        guard hasActiveAudioWork else { return }
         if audioEngine.isRunning {
             audioEngine.stop()
         }
@@ -142,9 +153,8 @@ final class VoiceInputService {
         task = nil
         state = .idle
         statusMessage = transcript.isEmpty ? recordingCapability.message : "Transcript captured"
-        // Deactivating the audio session can block, so keep it off the main actor.
-        Task.detached {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        Task {
+            await Self.deactivateAudioSession()
         }
         AppLog.voice.info("Voice recording stopped transcriptCharacters=\(self.transcript.count, privacy: .public)")
     }
@@ -158,13 +168,29 @@ final class VoiceInputService {
 
     func refreshRecordingCapability() {
         let previous = recordingCapability
-        recordingCapability = Self.defaultRecordingCapability()
+        recordingCapability = currentRecordingCapability()
         if !recordingCapability.isSupported {
             statusMessage = recordingCapability.message
         }
         if previous != recordingCapability {
             AppLog.voice.info("Voice recording capability changed from=\(previous.logLabel, privacy: .public) to=\(self.recordingCapability.logLabel, privacy: .public)")
         }
+    }
+
+    /// Full capability check including recognizer availability. Reuses the
+    /// stored recognizer instead of allocating throwaway instances per call.
+    private func currentRecordingCapability() -> VoiceRecordingCapability {
+        #if targetEnvironment(simulator)
+        return .unavailable(Self.unavailableMessage)
+        #else
+        if let configurationError = Self.speechRecognitionConfigurationError() {
+            return .unavailable(configurationError.errorDescription ?? Self.unavailableMessage)
+        }
+        guard recognizer != nil else {
+            return .unavailable("Speech recognition is unavailable. Type the transcript instead.")
+        }
+        return .supported
+        #endif
     }
 
     private func speechAuthorizationStatus() async throws -> SFSpeechRecognizerAuthorizationStatus {
@@ -196,11 +222,20 @@ final class VoiceInputService {
         }
     }
 
-    private func configureAudio() throws {
+    /// Configuring and activating the audio session performs blocking XPC calls
+    /// to the audio server (often >1s on first use), so it runs on the concurrent
+    /// executor instead of the main actor.
+    @concurrent
+    private static func activateAudioSession() async throws {
         let audioSession = AVAudioSession.sharedInstance()
         try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
         try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         AppLog.voice.debug("Audio session configured category=record mode=measurement")
+    }
+
+    @concurrent
+    private static func deactivateAudioSession() async {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func validateAudioRoute() throws {
@@ -245,8 +280,13 @@ final class VoiceInputService {
             inputNode.removeTap(onBus: 0)
             hasInstalledTap = false
         }
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            recognitionRequest.append(buffer)
+        // The tap block runs on the realtime audio thread, so it must not inherit
+        // this class's MainActor isolation (the inherited isolation traps with
+        // EXC_BREAKPOINT at runtime). Appending buffers to the request from the
+        // tap is the documented, thread-safe usage.
+        nonisolated(unsafe) let tapRequest = recognitionRequest
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
+            tapRequest.append(buffer)
         }
         hasInstalledTap = true
 
@@ -254,19 +294,26 @@ final class VoiceInputService {
         try audioEngine.start()
         AppLog.voice.debug("Audio engine started sampleRate=\(format.sampleRate, privacy: .public) channels=\(format.channelCount, privacy: .public)")
 
-        task = recognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
+        // The result handler may be delivered off the main thread; extract the
+        // Sendable pieces here and hop to the main actor for all state updates.
+        task = recognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
+            let transcript = result?.bestTranscription.formattedString
+            let isFinal = result?.isFinal ?? false
+            let errorDescription = error?.localizedDescription
+
             Task { @MainActor in
-                if let result {
-                    self?.transcript = result.bestTranscription.formattedString
-                    if result.isFinal {
-                        AppLog.voice.info("Speech recognition produced final transcript characters=\(result.bestTranscription.formattedString.count, privacy: .public)")
+                guard let self else { return }
+                if let transcript {
+                    self.transcript = transcript
+                    if isFinal {
+                        AppLog.voice.info("Speech recognition produced final transcript characters=\(transcript.count, privacy: .public)")
                     }
                 }
-                if let error {
-                    AppLog.voice.error("Speech recognition task ended error=\(error.localizedDescription, privacy: .public)")
+                if let errorDescription {
+                    AppLog.voice.error("Speech recognition task ended error=\(errorDescription, privacy: .public)")
                 }
-                if error != nil || result?.isFinal == true {
-                    self?.stopRecording()
+                if errorDescription != nil || isFinal {
+                    self.stopRecording()
                 }
             }
         }
