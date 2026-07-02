@@ -1,0 +1,49 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+
+# Xcode build output and reports
+DerivedData/
+build/
+*.xcresult
+*.xcarchive
+*.dSYM
+*.dSYM.zip
+*.ipa
+
+# Swift Package Manager local state
+.build/
+.swiftpm/
+Packages/
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace/
+
+# Local environment and signing material
+.env
+.env.*
+!.env.example
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+
+# Editor and local tool state
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.codex/
