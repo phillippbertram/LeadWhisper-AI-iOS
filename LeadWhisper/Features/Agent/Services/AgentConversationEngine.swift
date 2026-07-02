@@ -21,7 +21,8 @@ final class AgentConversationEngine {
         static let turnTimeoutSeconds = 20
         static let userContextLines = 8
         static let planningTokens = 120
-        static let responseTokens = 900
+        static let appleResponseTokens = 900
+        static let openAIResponseTokens = 3_000
     }
 
     /// Label for the lookup the model is running right now, shown live in the
@@ -317,7 +318,7 @@ final class AgentConversationEngine {
                 condensed: condensed,
                 toolScope: toolScope,
                 instructions: Self.instructions(toolScope: toolScope),
-                responseTokenLimit: Limits.responseTokens,
+                responseTokenLimit: Self.responseTokens(for: client.providerKind),
                 maxToolCalls: Limits.toolCallsPerTurn,
                 dataSource: reportingDataSource()
             )
@@ -422,7 +423,7 @@ final class AgentConversationEngine {
 
     private func updateContextWindowUsage(promptText: String, toolScope: AgentToolScope) async {
         let client = selectedModelClient()
-        let request = contextRequest(promptText: promptText, toolScope: toolScope)
+        let request = contextRequest(promptText: promptText, toolScope: toolScope, client: client)
         let fallback = client.estimatedContextWindowUsage(for: request)
         do {
             let measured = try await client.measuredContextWindowUsage(for: request)
@@ -435,22 +436,31 @@ final class AgentConversationEngine {
         }
     }
 
-    private func contextRequest(promptText: String, toolScope: AgentToolScope) -> AgentModelContextRequest {
+    private func contextRequest(promptText: String, toolScope: AgentToolScope, client: any AgentModelClient) -> AgentModelContextRequest {
         AgentModelContextRequest(
             promptText: promptText,
             instructions: Self.instructions(toolScope: toolScope),
             toolScope: toolScope,
             dataSource: toolDataSource,
             memoryPrompt: contextMemory.promptPrefix(),
-            responseReserveTokens: Limits.responseTokens
+            responseReserveTokens: Self.responseTokens(for: client.providerKind)
         )
     }
 
     private func logContextBudget(prompt: String, toolScope: AgentToolScope, condensed: Bool, client: any AgentModelClient) async {
-        let request = contextRequest(promptText: prompt, toolScope: toolScope)
+        let request = contextRequest(promptText: prompt, toolScope: toolScope, client: client)
         let fallback = client.estimatedContextWindowUsage(for: request)
         let usage = (try? await client.measuredContextWindowUsage(for: request)) ?? fallback
         AppLog.agent.debug("Agent context budget provider=\(client.providerKind.rawValue, privacy: .public) contextSize=\(usage.maximumTokens, privacy: .public) usedTokens=\(usage.usedTokens, privacy: .public) inputTokens=\(usage.inputTokens, privacy: .public) memoryTokens=\(usage.memoryTokens, privacy: .public) responseLimit=\(usage.responseReserveTokens, privacy: .public) availableTokens=\(usage.availableTokens, privacy: .public) estimated=\(usage.isEstimated, privacy: .public) condensed=\(condensed, privacy: .public) scope=\(toolScope.rawValue, privacy: .public)")
+    }
+
+    private static func responseTokens(for providerKind: AgentProviderKind) -> Int {
+        switch providerKind {
+        case .appleFoundationModels:
+            Limits.appleResponseTokens
+        case .openAI:
+            Limits.openAIResponseTokens
+        }
     }
 
     static func instructions(toolScope: AgentToolScope) -> String {

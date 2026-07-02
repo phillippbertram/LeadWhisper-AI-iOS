@@ -94,6 +94,18 @@ private struct SuggestionRow: View {
 }
 
 enum AgentSuggestionBuilder {
+    private static let meetingNotePrompt = """
+    Meeting note from today:
+
+    I spoke with Elena Fischer, Head of Operations at GreenGrid Energy. Her email is elena.fischer@greengrid.energy and her phone number is +49 30 5550 1842.
+
+    GreenGrid Energy wants a native iOS companion app for field technicians. The app should work offline, sync visit notes later, send push reminders, and hand completed jobs over to their dashboard. Elena said the project is qualified, the budget is about EUR 48,000, and they would like to start in October.
+
+    She asked for a proposal next week and wants the first version to focus on offline sync and the technician workflow.
+
+    Please create everything useful from this meeting note: the contact, the opportunity, a meeting interaction, and a follow-up to send the proposal next Tuesday.
+    """
+
     /// Builds starter suggestions from the local CRM so the empty state shows
     /// real records instead of canned demo text whenever data exists.
     static func suggestions(from snapshot: CRMDataSnapshot) -> [AgentSuggestion] {
@@ -103,6 +115,12 @@ enum AgentSuggestionBuilder {
                 subtitle: "I'll ask for the person, company, and next step",
                 systemImage: "person.crop.circle.badge.plus",
                 prompt: "I have a new lead"
+            ),
+            AgentSuggestion(
+                title: "Turn a meeting note into CRM",
+                subtitle: "Creates a contact, opportunity, note, and follow-up draft",
+                systemImage: "doc.text",
+                prompt: meetingNotePrompt
             )
         ]
 
@@ -128,7 +146,7 @@ enum AgentSuggestionBuilder {
                     prompt: "What is due today?"
                 )
             ])
-            return Array(items.prefix(4))
+            return Array(items.prefix(5))
         }
 
         items.append(AgentSuggestion(
@@ -168,6 +186,6 @@ enum AgentSuggestionBuilder {
             ))
         }
 
-        return Array(items.prefix(4))
+        return Array(items.prefix(5))
     }
 }
