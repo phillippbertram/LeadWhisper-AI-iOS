@@ -22,11 +22,12 @@ struct OpportunitiesView: View {
                             ForEach(stageOpportunities) { opportunity in
                                 OpportunityRow(opportunity: opportunity, followUps: followUps)
                                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                        Button(role: .destructive) {
+                                        Button {
                                             pendingDeleteOpportunity = opportunity
                                         } label: {
                                             Label("Delete", systemImage: "trash")
                                         }
+                                        .tint(.red)
 
                                         Button {
                                             sheet = .editOpportunity(opportunity.id)
@@ -54,13 +55,12 @@ struct OpportunitiesView: View {
                     }
                 }
             }
-            .confirmationDialog(
+            .alert(
                 "Delete opportunity?",
                 isPresented: Binding(
                     get: { pendingDeleteOpportunity != nil },
                     set: { if !$0 { pendingDeleteOpportunity = nil } }
-                ),
-                titleVisibility: .visible
+                )
             ) {
                 Button("Delete Opportunity", role: .destructive) {
                     if let pendingDeleteOpportunity {

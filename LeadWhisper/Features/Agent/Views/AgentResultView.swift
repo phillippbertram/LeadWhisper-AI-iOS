@@ -7,11 +7,12 @@ struct AgentResultView: View {
     let answerClarification: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
             if runResult.usedMockParser {
                 Label("Demo parser fallback", systemImage: "switch.2")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             AgentTimelineView(items: runResult.timeline)
@@ -19,31 +20,58 @@ struct AgentResultView: View {
 
             if let clarification = runResult.draft.clarification {
                 ClarificationView(clarification: clarification, select: answerClarification)
-
-                Button(role: .cancel, action: cancel) {
-                    Label("Cancel Draft", systemImage: "xmark")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+                cancelDraftButton
             } else {
                 ProposedChangesView(changes: runResult.draft.proposedChanges)
-
-                HStack(spacing: 12) {
-                    Button(role: .cancel, action: cancel) {
-                        Label("Cancel", systemImage: "xmark")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button(action: save) {
-                        Label("Save Changes", systemImage: "checkmark")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!runResult.draft.canApply)
-                }
+                reviewActionButtons
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var reviewActionButtons: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                cancelButton
+                saveButton
+            }
+
+            VStack(spacing: 10) {
+                saveButton
+                cancelButton
+            }
+        }
+    }
+
+    private var cancelButton: some View {
+        Button(role: .cancel, action: cancel) {
+            Label("Cancel", systemImage: "xmark")
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    private var cancelDraftButton: some View {
+        Button(role: .cancel, action: cancel) {
+            Label("Cancel Draft", systemImage: "xmark")
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    private var saveButton: some View {
+        Button(action: save) {
+            Label("Save Changes", systemImage: "checkmark")
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!runResult.draft.canApply)
     }
 }
 
@@ -65,6 +93,7 @@ private struct AgentTimelineView: View {
                         Text(item.detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -92,10 +121,12 @@ private struct DetectedFactsView: View {
                         Text(fact.detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func icon(for kind: String) -> String {
@@ -127,35 +158,39 @@ private struct ProposedChangesView: View {
                 .font(.headline)
             ForEach(changes) { change in
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Label(change.title, systemImage: icon(for: change.action))
                             .font(.subheadline.weight(.semibold))
-                        Spacer()
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
                         Text(change.action)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
                         if let contactName = change.contactName?.nilIfBlank {
-                            LabeledContent("Contact", value: contactName)
+                            ChangeDetailRow(title: "Contact", value: contactName)
                         }
                         if let company = change.company?.nilIfBlank {
-                            LabeledContent("Company", value: company)
+                            ChangeDetailRow(title: "Company", value: company)
                         }
                         if let opportunityTitle = change.opportunityTitle?.nilIfBlank {
-                            LabeledContent("Opportunity", value: opportunityTitle)
+                            ChangeDetailRow(title: "Opportunity", value: opportunityTitle)
                         }
                         if let stage = change.stage.flatMap(OpportunityStage.from) {
-                            LabeledContent("Stage", value: stage.title)
+                            ChangeDetailRow(title: "Stage", value: stage.title)
                         }
                         if let value = change.estimatedValueEUR {
-                            LabeledContent("Value", value: value.formatted(.currency(code: "EUR").precision(.fractionLength(0))))
+                            ChangeDetailRow(title: "Value", value: value.formatted(.currency(code: "EUR").precision(.fractionLength(0))))
                         } else if let budget = change.budgetText?.nilIfBlank {
-                            LabeledContent("Budget", value: budget)
+                            ChangeDetailRow(title: "Budget", value: budget)
                         }
                         if let dueDate = change.dueDateText?.nilIfBlank {
-                            LabeledContent("Due", value: dueDate)
+                            ChangeDetailRow(title: "Due", value: dueDate)
                         }
                         if let notes = change.notes?.nilIfBlank {
                             Text(notes)
@@ -168,6 +203,7 @@ private struct ProposedChangesView: View {
                     .font(.footnote)
                 }
                 .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.background, in: RoundedRectangle(cornerRadius: 8))
                 .overlay {
                     RoundedRectangle(cornerRadius: 8)
@@ -175,6 +211,7 @@ private struct ProposedChangesView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func icon(for action: String) -> String {
@@ -191,39 +228,66 @@ private struct ProposedChangesView: View {
     }
 }
 
+private struct ChangeDetailRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(title)
+                .foregroundStyle(.secondary)
+                .frame(width: 88, alignment: .leading)
+            Text(value)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private struct ClarificationView: View {
     let clarification: ClarificationPrompt
     let select: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             Label("Clarification Needed", systemImage: "questionmark.circle")
                 .font(.headline)
             Text(clarification.question)
                 .font(.body)
+                .fixedSize(horizontal: false, vertical: true)
             ForEach(clarification.options, id: \.self) { option in
                 Button {
                     select(option)
                 } label: {
-                    HStack(spacing: 12) {
+                    HStack(alignment: .top, spacing: 12) {
                         Image(systemName: "person.crop.circle.badge.checkmark")
                             .font(.title3)
+                            .frame(width: 24)
                         Text(option)
                             .font(.headline)
-                            .lineLimit(2)
+                            .lineLimit(nil)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         Image(systemName: "arrow.clockwise")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
+                            .padding(.top, 2)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 14)
+                    .padding(14)
                     .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                    .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(.blue.opacity(0.22))
+                    }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
             }
         }
         .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 }

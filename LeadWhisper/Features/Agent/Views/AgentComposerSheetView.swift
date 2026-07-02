@@ -8,6 +8,8 @@ struct AgentComposerSheetView: View {
             AgentComposerView(showTitle: true)
                 .navigationTitle("Agent")
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.regularMaterial, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Close") {
@@ -16,5 +18,8 @@ struct AgentComposerSheetView: View {
                     }
                 }
         }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(.regularMaterial)
     }
 }

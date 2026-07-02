@@ -63,11 +63,12 @@ struct TodayView: View {
                                     .tint(.orange)
                                 }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button(role: .destructive) {
+                                    Button {
                                         pendingDeleteTask = task
                                     } label: {
                                         Label("Delete", systemImage: "trash")
                                     }
+                                    .tint(.red)
 
                                     Button {
                                         sheet = .editFollowUp(task.id)
@@ -104,13 +105,12 @@ struct TodayView: View {
                     }
                 }
             }
-            .confirmationDialog(
+            .alert(
                 "Delete follow-up?",
                 isPresented: Binding(
                     get: { pendingDeleteTask != nil },
                     set: { if !$0 { pendingDeleteTask = nil } }
-                ),
-                titleVisibility: .visible
+                )
             ) {
                 Button("Delete Follow-up", role: .destructive) {
                     if let pendingDeleteTask {

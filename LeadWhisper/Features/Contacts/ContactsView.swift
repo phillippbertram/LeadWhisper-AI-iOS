@@ -47,11 +47,12 @@ struct ContactsView: View {
                         ContactRow(contact: contact, opportunities: opportunities, followUps: followUps)
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
+                        Button {
                             pendingDeleteContact = contact
                         } label: {
                             Label("Delete", systemImage: "trash")
                         }
+                        .tint(.red)
 
                         Button {
                             sheet = .editContact(contact.id)
@@ -81,13 +82,12 @@ struct ContactsView: View {
                     }
                 }
             }
-            .confirmationDialog(
+            .alert(
                 "Delete contact?",
                 isPresented: Binding(
                     get: { pendingDeleteContact != nil },
                     set: { if !$0 { pendingDeleteContact = nil } }
-                ),
-                titleVisibility: .visible
+                )
             ) {
                 Button("Delete Contact", role: .destructive) {
                     if let pendingDeleteContact {
@@ -101,13 +101,12 @@ struct ContactsView: View {
             } message: {
                 Text("Linked follow-ups are deleted. Opportunities and interactions keep their history but are unlinked.")
             }
-            .confirmationDialog(
+            .alert(
                 "Delete follow-up?",
                 isPresented: Binding(
                     get: { pendingDeleteFollowUp != nil },
                     set: { if !$0 { pendingDeleteFollowUp = nil } }
-                ),
-                titleVisibility: .visible
+                )
             ) {
                 Button("Delete Follow-up", role: .destructive) {
                     if let pendingDeleteFollowUp {
@@ -257,11 +256,12 @@ private struct ContactDetailView: View {
                                 .tint(.orange)
                             }
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button(role: .destructive) {
+                                Button {
                                     deleteFollowUp(task)
                                 } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
+                                .tint(.red)
 
                                 Button {
                                     editFollowUp(task)

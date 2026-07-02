@@ -35,44 +35,19 @@ struct AgentComposerView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if showTitle {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Voice Agent")
-                            .font(.largeTitle.bold())
-                        Text("Speak or type a CRM update, then review the local changes before saving.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
+                header
                 availabilityBanner
                 voiceControls
                 transcriptEditor
-
-                if isProcessing {
-                    ProgressView("Preparing local CRM changes")
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 18)
-                }
-
-                if let runResult {
-                    AgentResultView(
-                        runResult: runResult,
-                        save: saveDraft,
-                        cancel: cancelDraft,
-                        answerClarification: selectClarification
-                    )
-                }
-
-                if let statusMessage {
-                    Text(statusMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                processingState
+                resultSection
+                statusSection
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.top, showTitle ? 18 : 12)
+            .padding(.bottom, 28)
         }
+        .scrollDismissesKeyboard(.interactively)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -94,6 +69,23 @@ struct AgentComposerView: View {
         }
     }
 
+    @ViewBuilder
+    private var header: some View {
+        if showTitle {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Voice Agent")
+                    .font(.largeTitle.bold())
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
+                Text("Speak or type a CRM update, then review the local changes before saving.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private var availabilityBanner: some View {
         Label(agentService.availabilityMessage, systemImage: "brain")
             .font(.subheadline)
@@ -104,48 +96,70 @@ struct AgentComposerView: View {
     }
 
     private var voiceControls: some View {
-        HStack(spacing: 12) {
-            Button {
-                Task {
-                    if voiceInput.isRecording {
-                        voiceInput.stopRecording()
-                    } else {
-                        isVoiceSession = true
-                        await voiceInput.startRecording()
-                    }
-                }
-            } label: {
-                Label(voiceInput.recordButtonTitle, systemImage: voiceInput.recordButtonSystemImage)
-                    .frame(maxWidth: .infinity)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                recordButton
+                    .frame(minWidth: 176)
+                resetButton
+                    .frame(minWidth: 126)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!voiceInput.canRecordAudio && !voiceInput.isRecording)
 
-            Button {
-                analyzeTask?.cancel()
-                voiceInput.reset()
-                isVoiceSession = false
-                transcript = ""
-                runResult = nil
-                statusMessage = nil
-            } label: {
-                Label("Reset", systemImage: "arrow.counterclockwise")
+            VStack(spacing: 10) {
+                recordButton
+                resetButton
             }
-            .buttonStyle(.bordered)
         }
         .accessibilityElement(children: .contain)
     }
 
+    private var recordButton: some View {
+        Button {
+            Task {
+                if voiceInput.isRecording {
+                    voiceInput.stopRecording()
+                } else {
+                    isVoiceSession = true
+                    await voiceInput.startRecording()
+                }
+            }
+        } label: {
+            Label(voiceInput.recordButtonTitle, systemImage: voiceInput.recordButtonSystemImage)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!voiceInput.canRecordAudio && !voiceInput.isRecording)
+    }
+
+    private var resetButton: some View {
+        Button {
+            analyzeTask?.cancel()
+            voiceInput.reset()
+            isVoiceSession = false
+            transcript = ""
+            runResult = nil
+            statusMessage = nil
+        } label: {
+            Label("Reset", systemImage: "arrow.counterclockwise")
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+    }
+
     private var transcriptEditor: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Transcript")
                     .font(.headline)
-                Spacer()
                 Text(voiceInput.statusMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             TextEditor(text: Binding(
                 get: { transcript },
@@ -164,17 +178,64 @@ struct AgentComposerView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(.blue.opacity(accessibilityReduceMotion ? 0.45 : 0.18), lineWidth: accessibilityReduceMotion ? 1.2 : 0.7)
             }
-            .beamBorder(transcriptBeamConfiguration, isEnabled: !accessibilityReduceMotion)
+            .beamBorder(transcriptBeamConfiguration, isEnabled: voiceInput.isRecording && !accessibilityReduceMotion)
 
-            Button {
-                analyzeTask?.cancel()
-                analyzeTask = Task { await analyze() }
-            } label: {
-                Label("Prepare Changes", systemImage: "sparkles")
-                    .frame(maxWidth: .infinity)
+            prepareButton
+        }
+    }
+
+    private var prepareButton: some View {
+        Button {
+            analyzeTask?.cancel()
+            analyzeTask = Task { await analyze() }
+        } label: {
+            Label("Prepare Changes", systemImage: "sparkles")
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isProcessing)
+    }
+
+    @ViewBuilder
+    private var processingState: some View {
+        if isProcessing {
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Preparing local CRM changes")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isProcessing)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    @ViewBuilder
+    private var resultSection: some View {
+        if let runResult {
+            AgentResultView(
+                runResult: runResult,
+                save: saveDraft,
+                cancel: cancelDraft,
+                answerClarification: selectClarification
+            )
+            .padding(.top, 2)
+        }
+    }
+
+    @ViewBuilder
+    private var statusSection: some View {
+        if let statusMessage {
+            Text(statusMessage)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 2)
         }
     }
 
