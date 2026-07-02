@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.crmRepository) private var injectedRepository
     @Query private var contacts: [Contact]
     @Query private var opportunities: [Opportunity]
     @Query private var followUps: [FollowUpTask]
@@ -10,6 +11,7 @@ struct SettingsView: View {
     @Query private var activityEvents: [ActivityEvent]
     @State private var isConfirmingDeleteAllData = false
     @State private var statusMessage: String?
+    @State private var actionError: PresentableError?
 
     private var totalRecords: Int {
         contacts.count + opportunities.count + followUps.count + interactions.count + activityEvents.count
@@ -64,20 +66,25 @@ struct SettingsView: View {
             } message: {
                 Text("This permanently removes contacts, opportunities, follow-ups, interactions, and activity history.")
             }
+            .crmErrorAlert($actionError)
         }
     }
 
     private func loadDemoData() {
-        DemoDataSeeder.seed(in: modelContext)
-        statusMessage = "Demo data loaded."
+        do {
+            try DemoDataSeeder.seed(in: modelContext)
+            statusMessage = "Demo data loaded."
+        } catch {
+            actionError = PresentableError(error)
+        }
     }
 
     private func deleteAllData() {
         do {
-            try CRMRepository(context: modelContext).deleteAllData()
+            try injectedRepository.repository(fallback: modelContext).deleteAllData()
             statusMessage = "All data deleted."
         } catch {
-            statusMessage = "Could not delete all data: \(error.localizedDescription)"
+            actionError = PresentableError(error)
         }
     }
 }

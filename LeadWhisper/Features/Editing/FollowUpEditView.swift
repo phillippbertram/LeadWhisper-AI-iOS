@@ -3,6 +3,7 @@ import SwiftUI
 
 struct FollowUpEditView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.crmRepository) private var injectedRepository
     @Environment(\.dismiss) private var dismiss
     let task: FollowUpTask
     @State private var draft: FollowUpEditDraft
@@ -63,8 +64,8 @@ struct FollowUpEditView: View {
         task.notes = draft.notes
         task.updatedAt = .now
 
-        let repository = CRMRepository(context: modelContext)
-        repository.addActivity(title: "Follow-up updated", detail: task.title, entityKind: "followUp", entityID: task.id)
+        let repository = injectedRepository.repository(fallback: modelContext)
+        repository.addActivity(title: "Follow-up updated", detail: task.title, entityKind: .followUp, entityID: task.id)
         do {
             try repository.save()
             dismiss()

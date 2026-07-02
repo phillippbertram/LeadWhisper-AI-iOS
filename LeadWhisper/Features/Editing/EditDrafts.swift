@@ -35,7 +35,9 @@ struct OpportunityEditDraft {
     var tagsText: String
 
     var isValid: Bool {
-        title.nilIfBlank != nil && parsedEstimatedValue != nil || title.nilIfBlank != nil && estimatedValueText.nilIfBlank == nil
+        let hasTitle = title.nilIfBlank != nil
+        let hasEmptyOrValidEstimate = estimatedValueText.nilIfBlank == nil || parsedEstimatedValue != nil
+        return hasTitle && hasEmptyOrValidEstimate
     }
 
     var parsedEstimatedValue: Int? {

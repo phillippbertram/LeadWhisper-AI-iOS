@@ -11,29 +11,22 @@ final class CRMRepository {
     }
 
     func contacts() throws -> [Contact] {
-        try context.fetch(FetchDescriptor<Contact>())
-            .sorted { $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending }
+        try context.fetch(FetchDescriptor<Contact>(
+            sortBy: [SortDescriptor(\.fullName, comparator: .localizedStandard)]
+        ))
     }
 
     func opportunities() throws -> [Opportunity] {
-        try context.fetch(FetchDescriptor<Opportunity>())
-            .sorted { $0.updatedAt > $1.updatedAt }
+        try context.fetch(FetchDescriptor<Opportunity>(
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+        ))
     }
 
     func followUps() throws -> [FollowUpTask] {
+        // The nil-last due-date ordering is not expressible as a store-level
+        // sort descriptor, so sorting stays in memory.
         try context.fetch(FetchDescriptor<FollowUpTask>())
-            .sorted { lhs, rhs in
-                switch (lhs.dueDate, rhs.dueDate) {
-                case let (left?, right?):
-                    left < right
-                case (_?, nil):
-                    true
-                case (nil, _?):
-                    false
-                case (nil, nil):
-                    lhs.createdAt < rhs.createdAt
-                }
-            }
+            .sorted(by: FollowUpTask.dueDateOrder)
     }
 
     func snapshot() throws -> CRMDataSnapshot {
@@ -52,7 +45,7 @@ final class CRMRepository {
                 id: $0.id.uuidString,
                 title: $0.title,
                 company: $0.company,
-                contactID: $0.contactID?.uuidString,
+                contactID: $0.contact?.id.uuidString,
                 stage: $0.stage.rawValue,
                 estimatedValueEUR: $0.estimatedValueEUR,
                 budgetText: $0.budgetText,
@@ -65,8 +58,8 @@ final class CRMRepository {
             CRMFollowUpSnapshot(
                 id: $0.id.uuidString,
                 title: $0.title,
-                contactID: $0.contactID?.uuidString,
-                opportunityID: $0.opportunityID?.uuidString,
+                contactID: $0.contact?.id.uuidString,
+                opportunityID: $0.opportunity?.id.uuidString,
                 dueDateText: $0.dueDateText,
                 notes: $0.notes,
                 state: $0.state.rawValue
@@ -83,8 +76,10 @@ final class CRMRepository {
     }
 
     func contact(id string: String?) throws -> Contact? {
-        guard let string, let id = UUID(uuidString: string) else { return nil }
-        return try contacts().first { $0.id == id }
+        guard let string, let uuid = UUID(uuidString: string) else { return nil }
+        var descriptor = FetchDescriptor<Contact>(predicate: #Predicate { $0.id == uuid })
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
     }
 
     func contact(named name: String?, company: String? = nil) throws -> Contact? {
@@ -112,8 +107,10 @@ final class CRMRepository {
     }
 
     func opportunity(id string: String?) throws -> Opportunity? {
-        guard let string, let id = UUID(uuidString: string) else { return nil }
-        return try opportunities().first { $0.id == id }
+        guard let string, let uuid = UUID(uuidString: string) else { return nil }
+        var descriptor = FetchDescriptor<Opportunity>(predicate: #Predicate { $0.id == uuid })
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
     }
 
     func opportunity(title: String?, company: String? = nil, contactID: UUID? = nil) throws -> Opportunity? {
@@ -128,23 +125,32 @@ final class CRMRepository {
             let companyMatches = companyKey.isEmpty ||
                 opportunity.company.searchKey == companyKey ||
                 opportunity.company.searchKey.contains(companyKey)
-            let contactMatches = contactID == nil || opportunity.contactID == contactID
+            let contactMatches = contactID == nil || opportunity.contact?.id == contactID
             return titleMatches && companyMatches && contactMatches
         }
     }
 
     func followUp(id string: String?) throws -> FollowUpTask? {
-        guard let string, let id = UUID(uuidString: string) else { return nil }
-        return try followUps().first { $0.id == id }
+        guard let string, let uuid = UUID(uuidString: string) else { return nil }
+        var descriptor = FetchDescriptor<FollowUpTask>(predicate: #Predicate { $0.id == uuid })
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
+    }
+
+    func openFollowUps() throws -> [FollowUpTask] {
+        let openRaw = FollowUpState.open.rawValue
+        return try context.fetch(FetchDescriptor<FollowUpTask>(
+            predicate: #Predicate { $0.stateRaw == openRaw }
+        ))
+        .sorted(by: FollowUpTask.dueDateOrder)
     }
 
     func openFollowUp(contactID: UUID? = nil, opportunityID: UUID? = nil, query: String? = nil) throws -> FollowUpTask? {
         let key = query?.searchKey ?? ""
 
-        return try followUps().first { task in
-            guard task.state == .open else { return false }
-            let contactMatches = contactID == nil || task.contactID == contactID
-            let opportunityMatches = opportunityID == nil || task.opportunityID == opportunityID
+        return try openFollowUps().first { task in
+            let contactMatches = contactID == nil || task.contact?.id == contactID
+            let opportunityMatches = opportunityID == nil || task.opportunity?.id == opportunityID
             let queryMatches = key.isEmpty || task.title.searchKey.contains(key) || task.notes.searchKey.contains(key)
             return contactMatches && opportunityMatches && queryMatches
         }
@@ -155,36 +161,24 @@ final class CRMRepository {
         AppLog.data.debug("Inserted model type=\(String(describing: type(of: model)), privacy: .public)")
     }
 
-    func addActivity(title: String, detail: String = "", entityKind: String = "", entityID: UUID? = nil) {
+    func addActivity(title: String, detail: String = "", entityKind: ActivityEntityKind = .system, entityID: UUID? = nil) {
         context.insert(ActivityEvent(title: title, detail: detail, entityKind: entityKind, entityID: entityID))
-        AppLog.data.debug("Activity added title=\(title, privacy: .public) kind=\(entityKind, privacy: .public) entityID=\(entityID?.uuidString ?? "-", privacy: .public)")
+        AppLog.data.debug("Activity added title=\(title, privacy: .public) kind=\(entityKind.rawValue, privacy: .public) entityID=\(entityID?.uuidString ?? "-", privacy: .public)")
     }
 
     func deleteContact(_ contact: Contact) throws {
         let contactID = contact.id
         let contactName = contact.fullName
 
-        let tasksToDelete = try followUps().filter { $0.contactID == contactID }
-        let opportunitiesToUnlink = try opportunities().filter { $0.contactID == contactID }
-        let descriptor = FetchDescriptor<Interaction>()
-        let interactionsToUnlink = try context.fetch(descriptor).filter { $0.contactID == contactID }
+        AppLog.data.info("Deleting contact id=\(contactID.uuidString, privacy: .public) name=\(contactName, privacy: .private) followUpsToDelete=\(contact.followUps.count, privacy: .public) opportunitiesToUnlink=\(contact.opportunities.count, privacy: .public) interactionsToUnlink=\(contact.interactions.count, privacy: .public)")
 
-        AppLog.data.info("Deleting contact id=\(contactID.uuidString, privacy: .public) name=\(contactName, privacy: .private) followUpsToDelete=\(tasksToDelete.count, privacy: .public) opportunitiesToUnlink=\(opportunitiesToUnlink.count, privacy: .public) interactionsToUnlink=\(interactionsToUnlink.count, privacy: .public)")
-
-        for task in tasksToDelete {
-            context.delete(task)
-        }
-
-        for opportunity in opportunitiesToUnlink {
-            opportunity.contactID = nil
+        // Cascade removes the follow-ups; nullify unlinks opportunities and
+        // interactions. Only the unlink timestamp needs manual bookkeeping.
+        for opportunity in contact.opportunities {
             opportunity.updatedAt = .now
         }
 
-        for interaction in interactionsToUnlink {
-            interaction.contactID = nil
-        }
-
-        addActivity(title: "Contact deleted", detail: contactName, entityKind: "contact", entityID: contactID)
+        addActivity(title: "Contact deleted", detail: contactName, entityKind: .contact, entityID: contactID)
         context.delete(contact)
         try save()
     }
@@ -193,28 +187,16 @@ final class CRMRepository {
         let opportunityID = opportunity.id
         let opportunityTitle = opportunity.title
 
-        let tasksToDelete = try followUps().filter { $0.opportunityID == opportunityID }
-        let descriptor = FetchDescriptor<Interaction>()
-        let interactionsToUnlink = try context.fetch(descriptor).filter { $0.opportunityID == opportunityID }
+        AppLog.data.info("Deleting opportunity id=\(opportunityID.uuidString, privacy: .public) title=\(opportunityTitle, privacy: .private) followUpsToDelete=\(opportunity.followUps.count, privacy: .public) interactionsToUnlink=\(opportunity.interactions.count, privacy: .public)")
 
-        AppLog.data.info("Deleting opportunity id=\(opportunityID.uuidString, privacy: .public) title=\(opportunityTitle, privacy: .private) followUpsToDelete=\(tasksToDelete.count, privacy: .public) interactionsToUnlink=\(interactionsToUnlink.count, privacy: .public)")
-
-        for task in tasksToDelete {
-            context.delete(task)
-        }
-
-        for interaction in interactionsToUnlink {
-            interaction.opportunityID = nil
-        }
-
-        addActivity(title: "Opportunity deleted", detail: opportunityTitle, entityKind: "opportunity", entityID: opportunityID)
+        addActivity(title: "Opportunity deleted", detail: opportunityTitle, entityKind: .opportunity, entityID: opportunityID)
         context.delete(opportunity)
         try save()
     }
 
     func deleteFollowUp(_ task: FollowUpTask) throws {
         AppLog.data.info("Deleting follow-up id=\(task.id.uuidString, privacy: .public) title=\(task.title, privacy: .private)")
-        addActivity(title: "Follow-up deleted", detail: task.title, entityKind: "followUp", entityID: task.id)
+        addActivity(title: "Follow-up deleted", detail: task.title, entityKind: .followUp, entityID: task.id)
         context.delete(task)
         try save()
     }
@@ -251,7 +233,7 @@ final class CRMRepository {
         AppLog.data.info("Marking follow-up done id=\(task.id.uuidString, privacy: .public) title=\(task.title, privacy: .private)")
         task.state = .done
         task.updatedAt = .now
-        addActivity(title: "Follow-up completed", detail: task.title, entityKind: "followUp", entityID: task.id)
+        addActivity(title: "Follow-up completed", detail: task.title, entityKind: .followUp, entityID: task.id)
         try save()
     }
 
@@ -259,7 +241,7 @@ final class CRMRepository {
         AppLog.data.info("Archiving follow-up id=\(task.id.uuidString, privacy: .public) title=\(task.title, privacy: .private)")
         task.state = .archived
         task.updatedAt = .now
-        addActivity(title: "Follow-up archived", detail: task.title, entityKind: "followUp", entityID: task.id)
+        addActivity(title: "Follow-up archived", detail: task.title, entityKind: .followUp, entityID: task.id)
         try save()
     }
 

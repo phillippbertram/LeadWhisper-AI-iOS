@@ -3,10 +3,11 @@ import SwiftData
 
 @Model
 final class Opportunity {
+    #Index<Opportunity>([\.title], [\.company], [\.updatedAt])
+
     @Attribute(.unique) var id: UUID
     var title: String
     var company: String
-    var contactID: UUID?
     var stageRaw: String
     var estimatedValueEUR: Int?
     var budgetText: String
@@ -15,6 +16,16 @@ final class Opportunity {
     var tags: [String]
     var createdAt: Date
     var updatedAt: Date
+
+    var contact: Contact?
+
+    // Deleting an opportunity removes its follow-ups but keeps interactions
+    // as unlinked history.
+    @Relationship(deleteRule: .cascade, inverse: \FollowUpTask.opportunity)
+    var followUps: [FollowUpTask] = []
+
+    @Relationship(deleteRule: .nullify, inverse: \Interaction.opportunity)
+    var interactions: [Interaction] = []
 
     var stage: OpportunityStage {
         get { OpportunityStage(rawValue: stageRaw) ?? .lead }
@@ -25,7 +36,7 @@ final class Opportunity {
         id: UUID = UUID(),
         title: String,
         company: String = "",
-        contactID: UUID? = nil,
+        contact: Contact? = nil,
         stage: OpportunityStage = .lead,
         estimatedValueEUR: Int? = nil,
         budgetText: String = "",
@@ -38,7 +49,6 @@ final class Opportunity {
         self.id = id
         self.title = title
         self.company = company
-        self.contactID = contactID
         self.stageRaw = stage.rawValue
         self.estimatedValueEUR = estimatedValueEUR
         self.budgetText = budgetText
@@ -47,5 +57,6 @@ final class Opportunity {
         self.tags = tags
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.contact = contact
     }
 }

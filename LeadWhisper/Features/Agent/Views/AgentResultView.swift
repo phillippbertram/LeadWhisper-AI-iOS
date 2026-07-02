@@ -110,9 +110,9 @@ private struct DetectedFactsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Detected Facts")
                 .font(.headline)
-            ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
+            ForEach(facts, id: \.self) { fact in
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: icon(for: fact.kind))
+                    Image(systemName: fact.kind.systemImage)
                         .foregroundStyle(.green)
                         .frame(width: 22)
                     VStack(alignment: .leading, spacing: 2) {
@@ -128,25 +128,6 @@ private struct DetectedFactsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
-
-    private func icon(for kind: String) -> String {
-        switch kind {
-        case "contact":
-            "person"
-        case "company":
-            "building.2"
-        case "opportunity":
-            "chart.line.uptrend.xyaxis"
-        case "budget":
-            "eurosign.circle"
-        case "stage":
-            "flag"
-        case "followUp":
-            "bell"
-        default:
-            "note.text"
-        }
-    }
 }
 
 private struct ProposedChangesView: View {
@@ -159,12 +140,12 @@ private struct ProposedChangesView: View {
             ForEach(changes) { change in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Label(change.title, systemImage: icon(for: change.action))
+                        Label(change.title, systemImage: change.action.systemImage)
                             .font(.subheadline.weight(.semibold))
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 8)
-                        Text(change.action)
+                        Text(change.action.rawValue)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -213,19 +194,6 @@ private struct ProposedChangesView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
-
-    private func icon(for action: String) -> String {
-        switch action {
-        case "createContact", "updateContact":
-            "person.crop.circle.badge.plus"
-        case "createOpportunity", "updateOpportunityStage":
-            "chart.line.uptrend.xyaxis"
-        case "createFollowUp", "updateFollowUp", "archiveFollowUps":
-            "bell"
-        default:
-            "text.bubble"
-        }
-    }
 }
 
 private struct ChangeDetailRow: View {
@@ -241,6 +209,46 @@ private struct ChangeDetailRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private extension DetectedFactKind {
+    var systemImage: String {
+        switch self {
+        case .contact:
+            "person"
+        case .company:
+            "building.2"
+        case .opportunity:
+            "chart.line.uptrend.xyaxis"
+        case .budget:
+            "eurosign.circle"
+        case .stage:
+            "flag"
+        case .followUp:
+            "bell"
+        case .tag:
+            "tag"
+        case .note:
+            "note.text"
+        case .startDate:
+            "calendar"
+        }
+    }
+}
+
+private extension ProposedChangeAction {
+    var systemImage: String {
+        switch self {
+        case .createContact, .updateContact:
+            "person.crop.circle.badge.plus"
+        case .createOpportunity, .updateOpportunityStage:
+            "chart.line.uptrend.xyaxis"
+        case .createFollowUp, .updateFollowUp, .archiveFollowUps:
+            "bell"
+        case .createInteraction:
+            "text.bubble"
         }
     }
 }

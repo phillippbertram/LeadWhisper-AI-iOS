@@ -124,11 +124,13 @@ final class LeadAgentService {
     }
 
     private func instructions(for lookupMode: AgentLookupMode) -> String {
-        """
+        let actions = ProposedChangeAction.allCases.map(\.rawValue).joined(separator: ", ")
+
+        return """
         You are LeadWhisper, a local CRM planner. Return an AgentDraft only.
         Propose changes; never say data was saved. Ask clarification when a name or record is ambiguous.
         Stages: lead, qualified, proposalNeeded, proposalSent, won, lost.
-        Actions: createContact, updateContact, createOpportunity, updateOpportunityStage, createInteraction, createFollowUp, updateFollowUp, archiveFollowUps.
+        Actions: \(actions).
         Attached lookup tools: \(lookupMode.label). Use short queries from the transcript only.
         """
     }

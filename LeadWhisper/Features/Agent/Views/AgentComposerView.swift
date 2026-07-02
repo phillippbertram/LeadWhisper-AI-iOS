@@ -6,6 +6,7 @@ import SwiftUI
 struct AgentComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.crmRepository) private var injectedRepository
     @State private var voiceInput = VoiceInputService()
     @State private var agentService = LeadAgentService()
     @State private var speechOutput = SpeechOutputService()
@@ -15,6 +16,7 @@ struct AgentComposerView: View {
     @State private var runResult: AgentRunResult?
     @State private var isProcessing = false
     @State private var statusMessage: String?
+    @State private var actionError: PresentableError?
 
     var showTitle = true
 
@@ -48,6 +50,7 @@ struct AgentComposerView: View {
             .padding(.bottom, 28)
         }
         .scrollDismissesKeyboard(.interactively)
+        .crmErrorAlert($actionError)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -248,8 +251,7 @@ struct AgentComposerView: View {
         statusMessage = nil
         defer { isProcessing = false }
 
-        let repository = CRMRepository(context: modelContext)
-        let result = await agentService.draft(for: trimmed, repository: repository)
+        let result = await agentService.draft(for: trimmed, repository: injectedRepository.repository(fallback: modelContext))
 
         // A newer run (or a reset) may have superseded this one while awaiting.
         guard !Task.isCancelled else {
@@ -264,14 +266,13 @@ struct AgentComposerView: View {
     private func saveDraft() {
         guard let draft = runResult?.draft else { return }
         do {
-            let repository = CRMRepository(context: modelContext)
-            let result = try ChangeExecutor(repository: repository).apply(draft, transcript: transcript)
+            let result = try ChangeExecutor(repository: injectedRepository.repository(fallback: modelContext)).apply(draft, transcript: transcript)
             statusMessage = "Saved: \(result.changedTitles.joined(separator: ", "))"
             speechOutput.speak(result.spokenSummary)
             runResult = nil
             AppLog.agent.info("Agent draft saved changedTitles=\(result.changedTitles.count, privacy: .public)")
         } catch {
-            statusMessage = error.localizedDescription
+            actionError = PresentableError(error)
             AppLog.agent.error("Agent draft save failed error=\(error.localizedDescription, privacy: .public)")
         }
     }

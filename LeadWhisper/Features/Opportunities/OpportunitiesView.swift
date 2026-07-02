@@ -3,84 +3,104 @@ import SwiftUI
 
 struct OpportunitiesView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var opportunities: [Opportunity]
-    @Query private var followUps: [FollowUpTask]
+    @Environment(\.crmRepository) private var injectedRepository
+    @Query(sort: [SortDescriptor(\Opportunity.updatedAt, order: .reverse)])
+    private var opportunities: [Opportunity]
     @State private var sheet: OpportunitiesSheet?
     @State private var pendingDeleteOpportunity: Opportunity?
     @State private var actionError: PresentableError?
 
+    // Grouped once per update; the store-level sort keeps each group ordered.
+    private var opportunitiesByStage: [OpportunityStage: [Opportunity]] {
+        Dictionary(grouping: opportunities, by: \.stage)
+    }
+
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(OpportunityStage.allCases) { stage in
-                    let stageOpportunities = opportunities
-                        .filter { $0.stage == stage }
-                        .sorted { $0.updatedAt > $1.updatedAt }
+            content
+                .navigationTitle("Opportunities")
+                .talkFloatingAction {
+                    sheet = .agent
+                }
+                .sheet(item: $sheet) { sheet in
+                    switch sheet {
+                    case .agent:
+                        AgentComposerSheetView()
+                    case .editOpportunity(let opportunity):
+                        OpportunityEditView(opportunity: opportunity)
+                    }
+                }
+                .confirmationDialog(
+                    "Delete opportunity?",
+                    isPresented: .init(isPresenting: $pendingDeleteOpportunity),
+                    titleVisibility: .visible,
+                    presenting: pendingDeleteOpportunity
+                ) { opportunity in
+                    Button("Delete Opportunity", role: .destructive) {
+                        perform { try $0.deleteOpportunity(opportunity) }
+                        pendingDeleteOpportunity = nil
+                    }
+                    Button("Cancel", role: .cancel) {
+                        pendingDeleteOpportunity = nil
+                    }
+                } message: { _ in
+                    Text("Linked follow-ups are deleted. Interactions keep their history but are unlinked.")
+                }
+                .crmErrorAlert($actionError)
+        }
+    }
 
-                    if !stageOpportunities.isEmpty {
-                        Section(stage.title) {
-                            ForEach(stageOpportunities) { opportunity in
-                                OpportunityRow(opportunity: opportunity, followUps: followUps)
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                        Button {
-                                            pendingDeleteOpportunity = opportunity
-                                        } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                        .tint(.red)
+    @ViewBuilder
+    private var content: some View {
+        if opportunities.isEmpty {
+            ContentUnavailableView {
+                Label("No opportunities yet", systemImage: "chart.line.uptrend.xyaxis")
+            } description: {
+                Text("Capture a lead update to start building your local pipeline.")
+            } actions: {
+                Button {
+                    sheet = .agent
+                } label: {
+                    Label("Talk", systemImage: "mic.fill")
+                }
+            }
+        } else {
+            opportunityList
+        }
+    }
 
-                                        Button {
-                                            sheet = .editOpportunity(opportunity.id)
-                                        } label: {
-                                            Label("Edit", systemImage: "pencil")
-                                        }
-                                        .tint(.blue)
+    private var opportunityList: some View {
+        List {
+            ForEach(OpportunityStage.allCases) { stage in
+                if let stageOpportunities = opportunitiesByStage[stage] {
+                    Section(stage.title) {
+                        ForEach(stageOpportunities) { opportunity in
+                            OpportunityRow(opportunity: opportunity)
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button {
+                                        pendingDeleteOpportunity = opportunity
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
                                     }
-                            }
+                                    .tint(.red)
+
+                                    Button {
+                                        sheet = .editOpportunity(opportunity)
+                                    } label: {
+                                        Label("Edit", systemImage: "pencil")
+                                    }
+                                    .tint(.blue)
+                                }
                         }
                     }
                 }
             }
-            .navigationTitle("Opportunities")
-            .talkFloatingAction {
-                sheet = .agent
-            }
-            .sheet(item: $sheet) { sheet in
-                switch sheet {
-                case .agent:
-                    AgentComposerSheetView()
-                case .editOpportunity(let id):
-                    if let opportunity = opportunities.first(where: { $0.id == id }) {
-                        OpportunityEditView(opportunity: opportunity)
-                    }
-                }
-            }
-            .alert(
-                "Delete opportunity?",
-                isPresented: Binding(
-                    get: { pendingDeleteOpportunity != nil },
-                    set: { if !$0 { pendingDeleteOpportunity = nil } }
-                )
-            ) {
-                Button("Delete Opportunity", role: .destructive) {
-                    if let pendingDeleteOpportunity {
-                        perform { try $0.deleteOpportunity(pendingDeleteOpportunity) }
-                    }
-                    pendingDeleteOpportunity = nil
-                }
-                Button("Cancel", role: .cancel) {
-                    pendingDeleteOpportunity = nil
-                }
-            } message: {
-                Text("Linked follow-ups are deleted. Interactions keep their history but are unlinked.")
-            }
-            .crmErrorAlert($actionError)
         }
     }
 
     private func perform(_ action: (CRMRepository) throws -> Void) {
         do {
-            try action(CRMRepository(context: modelContext))
+            try action(injectedRepository.repository(fallback: modelContext))
         } catch {
             actionError = PresentableError(error)
         }
@@ -89,14 +109,14 @@ struct OpportunitiesView: View {
 
 private enum OpportunitiesSheet: Identifiable {
     case agent
-    case editOpportunity(UUID)
+    case editOpportunity(Opportunity)
 
     var id: String {
         switch self {
         case .agent:
             "agent"
-        case .editOpportunity(let id):
-            "editOpportunity-\(id.uuidString)"
+        case .editOpportunity(let opportunity):
+            "editOpportunity-\(opportunity.id.uuidString)"
         }
     }
 }
@@ -126,23 +146,11 @@ struct OpportunitySummaryRow: View {
 
 private struct OpportunityRow: View {
     let opportunity: Opportunity
-    let followUps: [FollowUpTask]
 
     private var nextFollowUp: FollowUpTask? {
-        followUps
-            .filter { $0.opportunityID == opportunity.id && $0.state == .open }
-            .sorted { lhs, rhs in
-                switch (lhs.dueDate, rhs.dueDate) {
-                case let (left?, right?):
-                    left < right
-                case (_?, nil):
-                    true
-                case (nil, _?):
-                    false
-                case (nil, nil):
-                    lhs.createdAt < rhs.createdAt
-                }
-            }
+        opportunity.followUps
+            .filter { $0.state == .open }
+            .sorted(by: FollowUpTask.dueDateOrder)
             .first
     }
 

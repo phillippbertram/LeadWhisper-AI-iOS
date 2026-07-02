@@ -8,7 +8,7 @@ enum DemoAgentParser {
             return AgentDraft(
                 summary: "Clarification needed before updating Max.",
                 detectedFacts: [
-                    DetectedFact(kind: "contact", value: "Max", detail: "Multiple local contacts match this name.")
+                    DetectedFact(kind: .contact, value: "Max", detail: "Multiple local contacts match this name.")
                 ],
                 proposedChanges: [],
                 clarification: clarification,
@@ -42,22 +42,22 @@ enum DemoAgentParser {
         let expectedStart = detectExpectedStart(in: key)
 
         var facts = [
-            DetectedFact(kind: "contact", value: contact.name, detail: "Person mentioned in the voice note."),
-            DetectedFact(kind: "company", value: contact.company, detail: "Company mentioned near the contact."),
-            DetectedFact(kind: "opportunity", value: opportunityTitle, detail: "Client need extracted from the transcript."),
-            DetectedFact(kind: "stage", value: stage.title, detail: "Stage requested or inferred for a new lead.")
+            DetectedFact(kind: .contact, value: contact.name, detail: "Person mentioned in the voice note."),
+            DetectedFact(kind: .company, value: contact.company, detail: "Company mentioned near the contact."),
+            DetectedFact(kind: .opportunity, value: opportunityTitle, detail: "Client need extracted from the transcript."),
+            DetectedFact(kind: .stage, value: stage.title, detail: "Stage requested or inferred for a new lead.")
         ]
 
         if let budget {
-            facts.append(DetectedFact(kind: "budget", value: "EUR \(budget)", detail: "Budget amount detected."))
+            facts.append(DetectedFact(kind: .budget, value: "EUR \(budget)", detail: "Budget amount detected."))
         }
         if let dueDateText {
-            facts.append(DetectedFact(kind: "followUp", value: dueDateText, detail: "Follow-up date requested."))
+            facts.append(DetectedFact(kind: .followUp, value: dueDateText, detail: "Follow-up date requested."))
         }
 
         var changes = [
             ProposedChange(
-                action: "createContact",
+                action: .createContact,
                 title: "Create Contact",
                 contactName: contact.name,
                 company: contact.company,
@@ -65,7 +65,7 @@ enum DemoAgentParser {
                 tags: tags
             ),
             ProposedChange(
-                action: "createOpportunity",
+                action: .createOpportunity,
                 title: "Create Opportunity",
                 contactName: contact.name,
                 company: contact.company,
@@ -82,7 +82,7 @@ enum DemoAgentParser {
         if let dueDateText {
             changes.append(
                 ProposedChange(
-                    action: "createFollowUp",
+                    action: .createFollowUp,
                     title: "Create Follow-up",
                     contactName: contact.name,
                     company: contact.company,
@@ -97,7 +97,7 @@ enum DemoAgentParser {
 
         changes.append(
             ProposedChange(
-                action: "createInteraction",
+                action: .createInteraction,
                 title: "Add Interaction",
                 contactName: contact.name,
                 company: contact.company,
@@ -130,13 +130,13 @@ enum DemoAgentParser {
         return AgentDraft(
             summary: "Update \(contactName) and move the opportunity to \(stage.title).",
             detectedFacts: [
-                DetectedFact(kind: "contact", value: contactName, detail: "Existing contact identified."),
-                DetectedFact(kind: "stage", value: stage.title, detail: "Opportunity stage requested."),
-                DetectedFact(kind: "followUp", value: dueDateText, detail: "Follow-up timing extracted.")
+                DetectedFact(kind: .contact, value: contactName, detail: "Existing contact identified."),
+                DetectedFact(kind: .stage, value: stage.title, detail: "Opportunity stage requested."),
+                DetectedFact(kind: .followUp, value: dueDateText, detail: "Follow-up timing extracted.")
             ],
             proposedChanges: [
                 ProposedChange(
-                    action: "updateOpportunityStage",
+                    action: .updateOpportunityStage,
                     title: "Update Opportunity Stage",
                     targetID: nil,
                     contactName: contactName,
@@ -147,7 +147,7 @@ enum DemoAgentParser {
                     tags: ["Proposal"]
                 ),
                 ProposedChange(
-                    action: "createFollowUp",
+                    action: .createFollowUp,
                     title: "Create Follow-up",
                     contactName: contactName,
                     company: company,
@@ -158,7 +158,7 @@ enum DemoAgentParser {
                     tags: ["Proposal"]
                 ),
                 ProposedChange(
-                    action: "createInteraction",
+                    action: .createInteraction,
                     title: "Add Interaction",
                     contactName: contactName,
                     company: company,
@@ -176,13 +176,13 @@ enum DemoAgentParser {
         AgentDraft(
             summary: "Reschedule Sarah's follow-up and add technical concept notes.",
             detectedFacts: [
-                DetectedFact(kind: "contact", value: "Sarah Klein", detail: "Contact referenced in the command."),
-                DetectedFact(kind: "followUp", value: "next Tuesday", detail: "New due date requested."),
-                DetectedFact(kind: "note", value: "Send a short technical concept", detail: "Additional task note.")
+                DetectedFact(kind: .contact, value: "Sarah Klein", detail: "Contact referenced in the command."),
+                DetectedFact(kind: .followUp, value: "next Tuesday", detail: "New due date requested."),
+                DetectedFact(kind: .note, value: "Send a short technical concept", detail: "Additional task note.")
             ],
             proposedChanges: [
                 ProposedChange(
-                    action: "updateFollowUp",
+                    action: .updateFollowUp,
                     title: "Move Follow-up",
                     contactName: "Sarah Klein",
                     company: "BluePeak",
@@ -201,13 +201,13 @@ enum DemoAgentParser {
         AgentDraft(
             summary: "Mark the BluePeak opportunity as lost and archive related open follow-ups.",
             detectedFacts: [
-                DetectedFact(kind: "company", value: "BluePeak", detail: "Company named in the command."),
-                DetectedFact(kind: "stage", value: "Lost", detail: "The user asked to mark the opportunity as lost."),
-                DetectedFact(kind: "note", value: "Budget too low", detail: "Loss reason.")
+                DetectedFact(kind: .company, value: "BluePeak", detail: "Company named in the command."),
+                DetectedFact(kind: .stage, value: "Lost", detail: "The user asked to mark the opportunity as lost."),
+                DetectedFact(kind: .note, value: "Budget too low", detail: "Loss reason.")
             ],
             proposedChanges: [
                 ProposedChange(
-                    action: "updateOpportunityStage",
+                    action: .updateOpportunityStage,
                     title: "Mark Opportunity Lost",
                     contactName: "Sarah Klein",
                     company: "BluePeak",
@@ -217,7 +217,7 @@ enum DemoAgentParser {
                     tags: ["Lost"]
                 ),
                 ProposedChange(
-                    action: "archiveFollowUps",
+                    action: .archiveFollowUps,
                     title: "Archive Related Follow-ups",
                     contactName: "Sarah Klein",
                     company: "BluePeak",

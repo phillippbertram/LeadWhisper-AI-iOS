@@ -29,26 +29,26 @@ struct ChangeExecutor {
 
         for change in draft.proposedChanges {
             collectedTags = collectedTags.mergingTags(change.tags)
-            AppLog.executor.debug("Applying proposed change action=\(change.action, privacy: .public) title=\(change.title, privacy: .private) targetID=\(change.targetID ?? "-", privacy: .public)")
+            AppLog.executor.debug("Applying proposed change action=\(change.action.rawValue, privacy: .public) title=\(change.title, privacy: .private) targetID=\(change.targetID ?? "-", privacy: .public)")
 
             switch change.action {
-            case "createContact", "updateContact":
+            case .createContact, .updateContact:
                 let contact = try findOrCreateContact(from: change)
                 update(contact, from: change)
                 touchedContact = contact
                 changedTitles.append(change.title)
-                addActivity(title: change.title, detail: contact.fullName, entityKind: "contact", entityID: contact.id)
+                addActivity(title: change.title, detail: contact.fullName, entityKind: .contact, entityID: contact.id)
 
-            case "createOpportunity":
+            case .createOpportunity:
                 let contact = try findOrCreateContact(from: change)
                 let opportunity = try findOrCreateOpportunity(from: change, contact: contact)
                 update(opportunity, from: change)
                 touchedContact = contact
                 touchedOpportunity = opportunity
                 changedTitles.append(change.title)
-                addActivity(title: change.title, detail: opportunity.title, entityKind: "opportunity", entityID: opportunity.id)
+                addActivity(title: change.title, detail: opportunity.title, entityKind: .opportunity, entityID: opportunity.id)
 
-            case "updateOpportunityStage":
+            case .updateOpportunityStage:
                 if let opportunity = try findOpportunity(from: change, fallbackContact: touchedContact) {
                     if let stage = OpportunityStage.from(change.stage) {
                         opportunity.stage = stage
@@ -57,17 +57,17 @@ struct ChangeExecutor {
                     opportunity.updatedAt = .now
                     touchedOpportunity = opportunity
                     changedTitles.append(change.title)
-                    addActivity(title: change.title, detail: opportunity.stage.title, entityKind: "opportunity", entityID: opportunity.id)
+                    addActivity(title: change.title, detail: opportunity.stage.title, entityKind: .opportunity, entityID: opportunity.id)
                 } else {
                     AppLog.executor.warning("Skipped opportunity stage update because no opportunity matched title=\(change.opportunityTitle ?? "-", privacy: .private) company=\(change.company ?? "-", privacy: .private)")
                 }
 
-            case "createFollowUp":
+            case .createFollowUp:
                 let contact = try findOrCreateContact(from: change)
                 let opportunity = try findOpportunity(from: change, fallbackContact: contact) ?? touchedOpportunity
                 let task = FollowUpTask(
-                    contactID: contact.id,
-                    opportunityID: opportunity?.id,
+                    contact: contact,
+                    opportunity: opportunity,
                     title: change.followUpTitle?.nilIfBlank ?? change.title,
                     dueDate: DueDateResolver.date(from: change.dueDateText),
                     dueDateText: change.dueDateText ?? "",
@@ -77,9 +77,9 @@ struct ChangeExecutor {
                 touchedContact = contact
                 touchedOpportunity = opportunity
                 changedTitles.append(change.title)
-                addActivity(title: change.title, detail: task.title, entityKind: "followUp", entityID: task.id)
+                addActivity(title: change.title, detail: task.title, entityKind: .followUp, entityID: task.id)
 
-            case "updateFollowUp":
+            case .updateFollowUp:
                 let contact = try repository.contact(id: change.targetID) ?? repository.contact(named: change.contactName, company: change.company)
                 let opportunity = try findOpportunity(from: change, fallbackContact: contact) ?? touchedOpportunity
                 if let task = try repository.followUp(id: change.targetID) ??
@@ -91,16 +91,15 @@ struct ChangeExecutor {
                     touchedContact = contact ?? touchedContact
                     touchedOpportunity = opportunity
                     changedTitles.append(change.title)
-                    addActivity(title: change.title, detail: task.title, entityKind: "followUp", entityID: task.id)
+                    addActivity(title: change.title, detail: task.title, entityKind: .followUp, entityID: task.id)
                 } else {
                     AppLog.executor.warning("Skipped follow-up update because no open task matched title=\(change.followUpTitle ?? "-", privacy: .private) contact=\(change.contactName ?? "-", privacy: .private)")
                 }
 
-            case "archiveFollowUps":
+            case .archiveFollowUps:
                 let opportunity = try findOpportunity(from: change, fallbackContact: touchedContact) ?? touchedOpportunity
-                let tasks = try repository.followUps().filter {
-                    $0.state == .open &&
-                    (opportunity == nil || $0.opportunityID == opportunity?.id)
+                let tasks = try repository.openFollowUps().filter {
+                    opportunity == nil || $0.opportunity?.id == opportunity?.id
                 }
                 for task in tasks {
                     task.state = .archived
@@ -108,28 +107,24 @@ struct ChangeExecutor {
                 }
                 touchedOpportunity = opportunity
                 changedTitles.append(change.title)
-                addActivity(title: change.title, detail: "\(tasks.count) follow-up(s) archived", entityKind: "followUp", entityID: opportunity?.id)
+                addActivity(title: change.title, detail: "\(tasks.count) follow-up(s) archived", entityKind: .followUp, entityID: opportunity?.id)
                 AppLog.executor.info("Archived related follow-ups count=\(tasks.count, privacy: .public) opportunityID=\(opportunity?.id.uuidString ?? "-", privacy: .public)")
 
-            case "createInteraction":
+            case .createInteraction:
                 changedTitles.append(change.title)
                 AppLog.executor.debug("Interaction will be created after proposed changes")
-
-            default:
-                AppLog.executor.warning("Unknown proposed change action ignored action=\(change.action, privacy: .public)")
-                break
             }
         }
 
         let interaction = Interaction(
-            contactID: touchedContact?.id,
-            opportunityID: touchedOpportunity?.id,
+            contact: touchedContact,
+            opportunity: touchedOpportunity,
             summary: draft.summary.nilIfBlank ?? "Voice CRM update",
             transcript: transcript,
             tags: collectedTags
         )
         repository.insert(interaction)
-        addActivity(title: "Activity log added", detail: interaction.summary, entityKind: "interaction", entityID: interaction.id)
+        addActivity(title: "Activity log added", detail: interaction.summary, entityKind: .interaction, entityID: interaction.id)
 
         try repository.save()
         AppLog.executor.info("Draft applied changedTitles=\(changedTitles.count, privacy: .public) interactionID=\(interaction.id.uuidString, privacy: .public)")
@@ -183,7 +178,7 @@ struct ChangeExecutor {
         let opportunity = Opportunity(
             title: change.opportunityTitle?.nilIfBlank ?? "New Opportunity",
             company: change.company?.nilIfBlank ?? contact?.company ?? "",
-            contactID: contact?.id
+            contact: contact
         )
         repository.insert(opportunity)
         AppLog.executor.info("Created opportunity id=\(opportunity.id.uuidString, privacy: .public) title=\(opportunity.title, privacy: .private)")
@@ -235,7 +230,7 @@ struct ChangeExecutor {
         }
     }
 
-    private func addActivity(title: String, detail: String, entityKind: String, entityID: UUID?) {
+    private func addActivity(title: String, detail: String, entityKind: ActivityEntityKind, entityID: UUID?) {
         repository.insert(ActivityEvent(title: title, detail: detail, entityKind: entityKind, entityID: entityID))
     }
 }

@@ -12,6 +12,8 @@ struct EditDraftTests {
         let opportunity = Opportunity(title: "Project")
         var opportunityDraft = OpportunityEditDraft(opportunity: opportunity)
         #expect(opportunityDraft.isValid)
+        opportunityDraft.estimatedValueText = ""
+        #expect(opportunityDraft.isValid)
         opportunityDraft.estimatedValueText = "not a number"
         #expect(opportunityDraft.isValid == false)
 

@@ -23,7 +23,7 @@ struct ChangeExecutorTests {
     @Test func executorUpdatesExistingOpportunityWithoutDuplicatingContact() throws {
         let container = try makeTestModelContainer()
         let context = ModelContext(container)
-        DemoDataSeeder.seed(in: context)
+        try DemoDataSeeder.seed(in: context)
 
         let repository = CRMRepository(context: context)
         let before = try repository.contacts().count
@@ -41,7 +41,7 @@ struct ChangeExecutorTests {
     @Test func ambiguousMaxProducesClarificationAndNoChanges() throws {
         let container = try makeTestModelContainer()
         let context = ModelContext(container)
-        DemoDataSeeder.seed(in: context)
+        try DemoDataSeeder.seed(in: context)
         let repository = CRMRepository(context: context)
 
         let draft = DemoAgentParser.makeDraft(
@@ -56,7 +56,7 @@ struct ChangeExecutorTests {
     @Test func clarificationAnswerResolvesMaxDraft() throws {
         let container = try makeTestModelContainer()
         let context = ModelContext(container)
-        DemoDataSeeder.seed(in: context)
+        try DemoDataSeeder.seed(in: context)
         let repository = CRMRepository(context: context)
 
         let draft = DemoAgentParser.makeDraft(
@@ -73,8 +73,8 @@ struct ChangeExecutorTests {
         let container = try makeTestModelContainer()
         let context = ModelContext(container)
         let sarah = Contact(fullName: "Sarah Klein", company: "BluePeak")
-        let opportunity = Opportunity(title: "Flutter app support", company: "BluePeak", contactID: sarah.id, stage: .proposalSent)
-        let task = FollowUpTask(contactID: sarah.id, opportunityID: opportunity.id, title: "Send proposal to Sarah", dueDateText: "Friday")
+        let opportunity = Opportunity(title: "Flutter app support", company: "BluePeak", contact: sarah, stage: .proposalSent)
+        let task = FollowUpTask(contact: sarah, opportunity: opportunity, title: "Send proposal to Sarah", dueDateText: "Friday")
         context.insert(sarah)
         context.insert(opportunity)
         context.insert(task)
@@ -87,5 +87,16 @@ struct ChangeExecutorTests {
 
         #expect(opportunity.stage == .lost)
         #expect(task.state == .archived)
+    }
+
+    @Test func demoParserProducesTypedFactsAndActions() {
+        let draft = DemoAgentParser.makeDraft(
+            transcript: "New contact: Sarah Klein from BluePeak. Create an opportunity and remind me on Friday."
+        )
+
+        #expect(draft.detectedFacts.contains { $0.kind == .contact })
+        #expect(draft.detectedFacts.contains { $0.kind == .company })
+        #expect(draft.proposedChanges.contains { $0.action == .createContact })
+        #expect(draft.proposedChanges.contains { $0.action == .createOpportunity })
     }
 }

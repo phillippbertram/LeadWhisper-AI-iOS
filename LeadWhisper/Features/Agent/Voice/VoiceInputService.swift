@@ -1,4 +1,6 @@
 import AVFoundation
+import CoreMedia
+import Darwin
 import Foundation
 import Observation
 import OSLog
@@ -31,21 +33,28 @@ final class VoiceInputService {
 
     var isRecording: Bool { state == .recording }
 
-    // Speech recognizer and audio engine each open XPC connections to system
-    // services; allocating them lazily keeps view construction from stalling
-    // the main thread when the composer first appears.
-    @ObservationIgnored
-    private lazy var recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) ?? SFSpeechRecognizer()
+    // The audio engine opens XPC connections to system services; allocating it
+    // lazily keeps view construction from stalling the main thread.
     @ObservationIgnored
     private lazy var audioEngine = AVAudioEngine()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
+    @ObservationIgnored
+    private var analyzer: SpeechAnalyzer?
+    @ObservationIgnored
+    private var transcriber: SpeechTranscriber?
+    @ObservationIgnored
+    private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
+    @ObservationIgnored
+    private var analysisTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var resultTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var transcriptionSegments: [TranscriptionSegment] = []
     private var hasInstalledTap = false
 
     /// True while any audio or recognition resources are live, without touching
     /// the lazy audio engine (so an early stop never allocates it).
     private var hasActiveAudioWork: Bool {
-        state != .idle || request != nil || task != nil || hasInstalledTap
+        state != .idle || inputContinuation != nil || analysisTask != nil || resultTask != nil || hasInstalledTap
     }
 
     init(recordingCapability: VoiceRecordingCapability? = nil) {
@@ -121,9 +130,11 @@ final class VoiceInputService {
         }
 
         do {
+            let transcriber = try await makeTranscriber()
+            try await prepareSpeechAssets(for: transcriber)
             try await Self.activateAudioSession()
             try validateAudioRoute()
-            try startAudioRecognition()
+            try await startAudioAnalysis(transcriber: transcriber)
             state = .recording
             didStartRecording = true
             statusMessage = "Listening..."
@@ -147,13 +158,20 @@ final class VoiceInputService {
             audioEngine.inputNode.removeTap(onBus: 0)
             hasInstalledTap = false
         }
-        request?.endAudio()
-        task?.cancel()
-        request = nil
-        task = nil
+        inputContinuation?.finish()
+        inputContinuation = nil
+        analysisTask?.cancel()
+        resultTask?.cancel()
+        analysisTask = nil
+        resultTask = nil
+        transcriber = nil
+        let analyzerToCancel = analyzer
+        analyzer = nil
+        transcriptionSegments = []
         state = .idle
         statusMessage = transcript.isEmpty ? recordingCapability.message : "Transcript captured"
         Task {
+            await analyzerToCancel?.cancelAndFinishNow()
             await Self.deactivateAudioSession()
         }
         AppLog.voice.info("Voice recording stopped transcriptCharacters=\(self.transcript.count, privacy: .public)")
@@ -162,6 +180,7 @@ final class VoiceInputService {
     func reset() {
         stopRecording()
         transcript = ""
+        transcriptionSegments = []
         statusMessage = recordingCapability.message
         AppLog.voice.debug("Voice transcript reset")
     }
@@ -177,8 +196,7 @@ final class VoiceInputService {
         }
     }
 
-    /// Full capability check including recognizer availability. Reuses the
-    /// stored recognizer instead of allocating throwaway instances per call.
+    /// Full capability check including transcriber availability.
     private func currentRecordingCapability() -> VoiceRecordingCapability {
         #if targetEnvironment(simulator)
         return .unavailable(Self.unavailableMessage)
@@ -186,8 +204,8 @@ final class VoiceInputService {
         if let configurationError = Self.speechRecognitionConfigurationError() {
             return .unavailable(configurationError.errorDescription ?? Self.unavailableMessage)
         }
-        guard recognizer != nil else {
-            return .unavailable("Speech recognition is unavailable. Type the transcript instead.")
+        guard SpeechTranscriber.isAvailable else {
+            return .unavailable("Speech transcription is unavailable. Type the transcript instead.")
         }
         return .supported
         #endif
@@ -215,11 +233,7 @@ final class VoiceInputService {
     }
 
     private func requestMicrophonePermission() async -> Bool {
-        await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { granted in
-                continuation.resume(returning: granted)
-            }
-        }
+        await AVAudioApplication.requestRecordPermission()
     }
 
     /// Configuring and activating the audio session performs blocking XPC calls
@@ -253,69 +267,169 @@ final class VoiceInputService {
         #endif
     }
 
-    private func startAudioRecognition() throws {
-        guard let recognizer else {
-            AppLog.voice.warning("No speech recognizer available")
-            throw VoiceInputError.noSpeechRecognizer
-        }
-        guard recognizer.isAvailable else {
-            AppLog.voice.warning("Speech recognizer unavailable locale=\(recognizer.locale.identifier, privacy: .public)")
+    private func makeTranscriber() async throws -> SpeechTranscriber {
+        guard SpeechTranscriber.isAvailable else {
+            AppLog.voice.warning("SpeechTranscriber unavailable")
             throw VoiceInputError.speechRecognizerUnavailable
         }
 
-        task?.cancel()
-        task = nil
+        let preferredLocale = Locale.current
+        let locale: Locale?
+        if let supportedPreferredLocale = await SpeechTranscriber.supportedLocale(equivalentTo: preferredLocale) {
+            locale = supportedPreferredLocale
+        } else {
+            locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US"))
+        }
 
-        let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        recognitionRequest.shouldReportPartialResults = true
-        self.request = recognitionRequest
+        guard let locale else {
+            AppLog.voice.warning("No supported speech transcription locale for preferred=\(preferredLocale.identifier, privacy: .public)")
+            throw VoiceInputError.speechRecognizerUnavailable
+        }
+
+        AppLog.voice.debug("SpeechTranscriber selected locale=\(locale.identifier, privacy: .public)")
+        return SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+    }
+
+    private func prepareSpeechAssets(for transcriber: SpeechTranscriber) async throws {
+        let modules: [any SpeechModule] = [transcriber]
+        let status = await AssetInventory.status(forModules: modules)
+        AppLog.voice.debug("Speech asset status=\(String(describing: status), privacy: .public)")
+
+        switch status {
+        case .installed:
+            return
+        case .supported, .downloading:
+            guard let request = try await AssetInventory.assetInstallationRequest(supporting: modules) else {
+                return
+            }
+            statusMessage = "Preparing on-device speech model..."
+            try await request.downloadAndInstall()
+            AppLog.voice.info("Speech assets installed for transcription")
+        case .unsupported:
+            throw VoiceInputError.speechRecognizerUnavailable
+        @unknown default:
+            throw VoiceInputError.speechRecognizerUnavailable
+        }
+    }
+
+    private func startAudioAnalysis(transcriber: SpeechTranscriber) async throws {
+        analysisTask?.cancel()
+        resultTask?.cancel()
+        analysisTask = nil
+        resultTask = nil
+        transcriptionSegments = []
 
         let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
+        let naturalFormat = inputNode.outputFormat(forBus: 0)
+        let format = await SpeechAnalyzer.bestAvailableAudioFormat(
+            compatibleWith: [transcriber],
+            considering: naturalFormat
+        ) ?? naturalFormat
+
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw VoiceInputError.invalidInputFormat
+        }
+
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        try await analyzer.prepareToAnalyze(in: format)
+        self.analyzer = analyzer
+        self.transcriber = transcriber
+
+        let (inputStream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
+        inputContinuation = continuation
+
+        resultTask = Task { [weak self, transcriber] in
+            do {
+                for try await result in transcriber.results {
+                    await MainActor.run {
+                        self?.applyTranscriptionResult(result)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.statusMessage = Self.friendlyMessage(for: error)
+                    AppLog.voice.error("Speech transcription results failed error=\(error.localizedDescription, privacy: .public)")
+                    self.stopRecording()
+                }
+            }
+        }
+
+        analysisTask = Task { [weak self, analyzer] in
+            do {
+                _ = try await analyzer.analyzeSequence(inputStream)
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
+            } catch is CancellationError {
+                AppLog.voice.debug("Speech analysis task cancelled")
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.statusMessage = Self.friendlyMessage(for: error)
+                    AppLog.voice.error("Speech analysis failed error=\(error.localizedDescription, privacy: .public)")
+                    self.stopRecording()
+                }
+            }
         }
 
         if hasInstalledTap {
             inputNode.removeTap(onBus: 0)
             hasInstalledTap = false
         }
-        // The tap block runs on the realtime audio thread, so it must not inherit
-        // this class's MainActor isolation (the inherited isolation traps with
-        // EXC_BREAKPOINT at runtime). Appending buffers to the request from the
-        // tap is the documented, thread-safe usage.
-        nonisolated(unsafe) let tapRequest = recognitionRequest
+        // The tap block runs on the realtime audio thread; copy the buffer before
+        // handing it to the async analysis stream so later engine reuse cannot
+        // mutate memory still being analyzed.
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
-            tapRequest.append(buffer)
+            let analysisBuffer = Self.copyBuffer(buffer) ?? buffer
+            continuation.yield(AnalyzerInput(buffer: analysisBuffer))
         }
         hasInstalledTap = true
 
         audioEngine.prepare()
         try audioEngine.start()
         AppLog.voice.debug("Audio engine started sampleRate=\(format.sampleRate, privacy: .public) channels=\(format.channelCount, privacy: .public)")
-
-        // The result handler may be delivered off the main thread; extract the
-        // Sendable pieces here and hop to the main actor for all state updates.
-        task = recognizer.recognitionTask(with: recognitionRequest) { @Sendable [weak self] result, error in
-            let transcript = result?.bestTranscription.formattedString
-            let isFinal = result?.isFinal ?? false
-            let errorDescription = error?.localizedDescription
-
-            Task { @MainActor in
-                guard let self else { return }
-                if let transcript {
-                    self.transcript = transcript
-                    if isFinal {
-                        AppLog.voice.info("Speech recognition produced final transcript characters=\(transcript.count, privacy: .public)")
-                    }
-                }
-                if let errorDescription {
-                    AppLog.voice.error("Speech recognition task ended error=\(errorDescription, privacy: .public)")
-                }
-                if errorDescription != nil || isFinal {
-                    self.stopRecording()
-                }
-            }
-        }
     }
+
+    private func applyTranscriptionResult(_ result: SpeechTranscriber.Result) {
+        let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        if let index = transcriptionSegments.firstIndex(where: { $0.range == result.range }) {
+            transcriptionSegments[index].text = text
+        } else {
+            transcriptionSegments.append(TranscriptionSegment(range: result.range, text: text))
+        }
+
+        transcriptionSegments.sort {
+            CMTimeCompare($0.range.start, $1.range.start) < 0
+        }
+        transcript = transcriptionSegments.map(\.text).joined(separator: " ")
+        AppLog.voice.debug("Speech transcription updated segments=\(self.transcriptionSegments.count, privacy: .public) characters=\(self.transcript.count, privacy: .public)")
+    }
+
+    private nonisolated static func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else {
+            return nil
+        }
+
+        copy.frameLength = buffer.frameLength
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let destinationBuffers = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        for index in 0..<sourceBuffers.count {
+            guard let source = sourceBuffers[index].mData,
+                  let destination = destinationBuffers[index].mData
+            else {
+                continue
+            }
+            let byteCount = Int(sourceBuffers[index].mDataByteSize)
+            memcpy(destination, source, byteCount)
+            destinationBuffers[index].mDataByteSize = sourceBuffers[index].mDataByteSize
+        }
+
+        return copy
+    }
+}
+
+private struct TranscriptionSegment {
+    var range: CMTimeRange
+    var text: String
 }

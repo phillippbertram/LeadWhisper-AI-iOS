@@ -4,30 +4,25 @@ import SwiftUI
 struct ContentView: View {
     var body: some View {
         TabView {
-            TodayView()
-                .tabItem {
-                    Label("Today", systemImage: "calendar")
-                }
+            Tab("Today", systemImage: "calendar") {
+                TodayView()
+            }
 
-            ContactsView()
-                .tabItem {
-                    Label("Contacts", systemImage: "person.2")
-                }
+            Tab("Contacts", systemImage: "person.2") {
+                ContactsView()
+            }
 
-            OpportunitiesView()
-                .tabItem {
-                    Label("Opportunities", systemImage: "chart.line.uptrend.xyaxis")
-                }
+            Tab("Opportunities", systemImage: "chart.line.uptrend.xyaxis") {
+                OpportunitiesView()
+            }
 
-            AgentView()
-                .tabItem {
-                    Label("Agent", systemImage: "sparkles")
-                }
+            Tab("Agent", systemImage: "sparkles") {
+                AgentView()
+            }
 
-            SettingsView()
-                .tabItem {
-                    Label("Settings", systemImage: "gearshape")
-                }
+            Tab("Settings", systemImage: "gearshape") {
+                SettingsView()
+            }
         }
     }
 }

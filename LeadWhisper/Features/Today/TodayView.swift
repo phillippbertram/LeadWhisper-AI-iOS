@@ -3,7 +3,10 @@ import SwiftUI
 
 struct TodayView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var followUps: [FollowUpTask]
+    @Environment(\.crmRepository) private var injectedRepository
+    // "open" is FollowUpState.open.rawValue; #Predicate cannot reference the enum.
+    @Query(filter: #Predicate<FollowUpTask> { $0.stateRaw == "open" })
+    private var openTasks: [FollowUpTask]
     @Query private var latestActivity: [ActivityEvent]
     @State private var sheet: TodaySheet?
     @State private var pendingDeleteTask: FollowUpTask?
@@ -18,20 +21,7 @@ struct TodayView: View {
     }
 
     private var openFollowUps: [FollowUpTask] {
-        followUps
-            .filter { $0.state == .open }
-            .sorted { lhs, rhs in
-                switch (lhs.dueDate, rhs.dueDate) {
-                case let (left?, right?):
-                    left < right
-                case (_?, nil):
-                    true
-                case (nil, _?):
-                    false
-                case (nil, nil):
-                    lhs.createdAt < rhs.createdAt
-                }
-            }
+        openTasks.sorted(by: FollowUpTask.dueDateOrder)
     }
 
     private var latestActivityEvent: ActivityEvent? {
@@ -71,7 +61,7 @@ struct TodayView: View {
                                     .tint(.red)
 
                                     Button {
-                                        sheet = .editFollowUp(task.id)
+                                        sheet = .editFollowUp(task)
                                     } label: {
                                         Label("Edit", systemImage: "pencil")
                                     }
@@ -99,29 +89,24 @@ struct TodayView: View {
                 switch sheet {
                 case .agent:
                     AgentComposerSheetView()
-                case .editFollowUp(let id):
-                    if let task = followUps.first(where: { $0.id == id }) {
-                        FollowUpEditView(task: task)
-                    }
+                case .editFollowUp(let task):
+                    FollowUpEditView(task: task)
                 }
             }
-            .alert(
+            .confirmationDialog(
                 "Delete follow-up?",
-                isPresented: Binding(
-                    get: { pendingDeleteTask != nil },
-                    set: { if !$0 { pendingDeleteTask = nil } }
-                )
-            ) {
+                isPresented: .init(isPresenting: $pendingDeleteTask),
+                titleVisibility: .visible,
+                presenting: pendingDeleteTask
+            ) { task in
                 Button("Delete Follow-up", role: .destructive) {
-                    if let pendingDeleteTask {
-                        perform { try $0.deleteFollowUp(pendingDeleteTask) }
-                    }
+                    perform { try $0.deleteFollowUp(task) }
                     pendingDeleteTask = nil
                 }
                 Button("Cancel", role: .cancel) {
                     pendingDeleteTask = nil
                 }
-            } message: {
+            } message: { _ in
                 Text("This removes the task and writes an activity entry.")
             }
             .crmErrorAlert($actionError)
@@ -130,7 +115,7 @@ struct TodayView: View {
 
     private func perform(_ action: (CRMRepository) throws -> Void) {
         do {
-            try action(CRMRepository(context: modelContext))
+            try action(injectedRepository.repository(fallback: modelContext))
         } catch {
             actionError = PresentableError(error)
         }
@@ -139,14 +124,14 @@ struct TodayView: View {
 
 private enum TodaySheet: Identifiable {
     case agent
-    case editFollowUp(UUID)
+    case editFollowUp(FollowUpTask)
 
     var id: String {
         switch self {
         case .agent:
             "agent"
-        case .editFollowUp(let id):
-            "editFollowUp-\(id.uuidString)"
+        case .editFollowUp(let task):
+            "editFollowUp-\(task.id.uuidString)"
         }
     }
 }
@@ -257,17 +242,6 @@ private struct ActivityRow: View {
 
 private extension ActivityEvent {
     var activityIconName: String {
-        switch entityKind {
-        case "contact":
-            "person.crop.circle"
-        case "opportunity":
-            "chart.line.uptrend.xyaxis"
-        case "followUp":
-            "bell"
-        case "interaction":
-            "text.bubble"
-        default:
-            "sparkles"
-        }
+        entityKind.systemImage
     }
 }

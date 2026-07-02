@@ -3,9 +3,9 @@ import SwiftUI
 
 struct ContactsView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var contacts: [Contact]
-    @Query private var opportunities: [Opportunity]
-    @Query private var followUps: [FollowUpTask]
+    @Environment(\.crmRepository) private var injectedRepository
+    @Query(sort: [SortDescriptor(\Contact.fullName, comparator: .localizedStandard)])
+    private var contacts: [Contact]
     @State private var searchText = ""
     @State private var sheet: ContactsSheet?
     @State private var pendingDeleteContact: Contact?
@@ -13,15 +13,13 @@ struct ContactsView: View {
     @State private var actionError: PresentableError?
 
     private var filteredContacts: [Contact] {
-        let sorted = contacts.sorted {
-            $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending
-        }
-
+        // The diacritic-insensitive searchKey matching cannot run in a
+        // #Predicate, so the search filter stays in memory.
         guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return sorted
+            return contacts
         }
 
-        return sorted.filter {
+        return contacts.filter {
             $0.fullName.containsSearch(searchText) ||
             $0.company.containsSearch(searchText) ||
             $0.tags.contains { $0.containsSearch(searchText) }
@@ -30,101 +28,124 @@ struct ContactsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(filteredContacts) { contact in
-                    NavigationLink {
-                        ContactDetailView(
-                            contact: contact,
-                            opportunities: opportunities,
-                            followUps: followUps,
-                            editContact: { sheet = .editContact(contact.id) },
-                            editFollowUp: { sheet = .editFollowUp($0.id) },
-                            markFollowUpDone: { task in perform { try $0.markFollowUpDone(task) } },
-                            archiveFollowUp: { task in perform { try $0.archiveFollowUp(task) } },
-                            deleteFollowUp: { pendingDeleteFollowUp = $0 }
-                        )
-                    } label: {
-                        ContactRow(contact: contact, opportunities: opportunities, followUps: followUps)
-                    }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button {
-                            pendingDeleteContact = contact
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                        .tint(.red)
-
-                        Button {
-                            sheet = .editContact(contact.id)
-                        } label: {
-                            Label("Edit", systemImage: "pencil")
-                        }
-                        .tint(.blue)
-                    }
+            content
+                .navigationTitle("Contacts")
+                .searchable(text: $searchText, prompt: "Search contacts")
+                .talkFloatingAction {
+                    sheet = .agent
                 }
-            }
-            .navigationTitle("Contacts")
-            .searchable(text: $searchText, prompt: "Search contacts")
-            .talkFloatingAction {
-                sheet = .agent
-            }
-            .sheet(item: $sheet) { sheet in
-                switch sheet {
-                case .agent:
-                    AgentComposerSheetView()
-                case .editContact(let id):
-                    if let contact = contacts.first(where: { $0.id == id }) {
+                .sheet(item: $sheet) { sheet in
+                    switch sheet {
+                    case .agent:
+                        AgentComposerSheetView()
+                    case .editContact(let contact):
                         ContactEditView(contact: contact)
-                    }
-                case .editFollowUp(let id):
-                    if let task = followUps.first(where: { $0.id == id }) {
+                    case .editFollowUp(let task):
                         FollowUpEditView(task: task)
                     }
                 }
-            }
-            .alert(
-                "Delete contact?",
-                isPresented: Binding(
-                    get: { pendingDeleteContact != nil },
-                    set: { if !$0 { pendingDeleteContact = nil } }
-                )
-            ) {
-                Button("Delete Contact", role: .destructive) {
-                    if let pendingDeleteContact {
-                        perform { try $0.deleteContact(pendingDeleteContact) }
+                .confirmationDialog(
+                    "Delete contact?",
+                    isPresented: .init(isPresenting: $pendingDeleteContact),
+                    titleVisibility: .visible,
+                    presenting: pendingDeleteContact
+                ) { contact in
+                    Button("Delete Contact", role: .destructive) {
+                        perform { try $0.deleteContact(contact) }
+                        pendingDeleteContact = nil
                     }
-                    pendingDeleteContact = nil
-                }
-                Button("Cancel", role: .cancel) {
-                    pendingDeleteContact = nil
-                }
-            } message: {
-                Text("Linked follow-ups are deleted. Opportunities and interactions keep their history but are unlinked.")
-            }
-            .alert(
-                "Delete follow-up?",
-                isPresented: Binding(
-                    get: { pendingDeleteFollowUp != nil },
-                    set: { if !$0 { pendingDeleteFollowUp = nil } }
-                )
-            ) {
-                Button("Delete Follow-up", role: .destructive) {
-                    if let pendingDeleteFollowUp {
-                        perform { try $0.deleteFollowUp(pendingDeleteFollowUp) }
+                    Button("Cancel", role: .cancel) {
+                        pendingDeleteContact = nil
                     }
-                    pendingDeleteFollowUp = nil
+                } message: { _ in
+                    Text("Linked follow-ups are deleted. Opportunities and interactions keep their history but are unlinked.")
                 }
-                Button("Cancel", role: .cancel) {
-                    pendingDeleteFollowUp = nil
+                .confirmationDialog(
+                    "Delete follow-up?",
+                    isPresented: .init(isPresenting: $pendingDeleteFollowUp),
+                    titleVisibility: .visible,
+                    presenting: pendingDeleteFollowUp
+                ) { task in
+                    Button("Delete Follow-up", role: .destructive) {
+                        perform { try $0.deleteFollowUp(task) }
+                        pendingDeleteFollowUp = nil
+                    }
+                    Button("Cancel", role: .cancel) {
+                        pendingDeleteFollowUp = nil
+                    }
+                }
+                .crmErrorAlert($actionError)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if contacts.isEmpty {
+            ContentUnavailableView {
+                Label("No contacts yet", systemImage: "person.2")
+            } description: {
+                Text("Capture a lead update to create your first local contact.")
+            } actions: {
+                Button {
+                    sheet = .agent
+                } label: {
+                    Label("Talk", systemImage: "mic.fill")
                 }
             }
-            .crmErrorAlert($actionError)
+        } else if filteredContacts.isEmpty {
+            ContentUnavailableView {
+                Label("No matching contacts", systemImage: "magnifyingglass")
+            } description: {
+                Text("Try a different name, company, or tag.")
+            } actions: {
+                Button {
+                    sheet = .agent
+                } label: {
+                    Label("Talk", systemImage: "mic.fill")
+                }
+            }
+        } else {
+            contactList
+        }
+    }
+
+    private var contactList: some View {
+        List {
+            ForEach(filteredContacts) { contact in
+                NavigationLink {
+                    ContactDetailView(
+                        contact: contact,
+                        editContact: { sheet = .editContact(contact) },
+                        editFollowUp: { sheet = .editFollowUp($0) },
+                        markFollowUpDone: { task in perform { try $0.markFollowUpDone(task) } },
+                        archiveFollowUp: { task in perform { try $0.archiveFollowUp(task) } },
+                        deleteFollowUp: { pendingDeleteFollowUp = $0 }
+                    )
+                } label: {
+                    ContactRow(contact: contact)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button {
+                        pendingDeleteContact = contact
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .tint(.red)
+
+                    Button {
+                        sheet = .editContact(contact)
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    .tint(.blue)
+                }
+            }
         }
     }
 
     private func perform(_ action: (CRMRepository) throws -> Void) {
         do {
-            try action(CRMRepository(context: modelContext))
+            try action(injectedRepository.repository(fallback: modelContext))
         } catch {
             actionError = PresentableError(error)
         }
@@ -133,32 +154,30 @@ struct ContactsView: View {
 
 private enum ContactsSheet: Identifiable {
     case agent
-    case editContact(UUID)
-    case editFollowUp(UUID)
+    case editContact(Contact)
+    case editFollowUp(FollowUpTask)
 
     var id: String {
         switch self {
         case .agent:
             "agent"
-        case .editContact(let id):
-            "editContact-\(id.uuidString)"
-        case .editFollowUp(let id):
-            "editFollowUp-\(id.uuidString)"
+        case .editContact(let contact):
+            "editContact-\(contact.id.uuidString)"
+        case .editFollowUp(let task):
+            "editFollowUp-\(task.id.uuidString)"
         }
     }
 }
 
 private struct ContactRow: View {
     let contact: Contact
-    let opportunities: [Opportunity]
-    let followUps: [FollowUpTask]
 
     private var contactOpportunities: [Opportunity] {
-        opportunities.filter { $0.contactID == contact.id }
+        contact.opportunities.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     private var openFollowUps: [FollowUpTask] {
-        followUps.filter { $0.contactID == contact.id && $0.state == .open }
+        contact.followUps.filter { $0.state == .open }
     }
 
     var body: some View {
@@ -197,8 +216,6 @@ private struct ContactRow: View {
 
 private struct ContactDetailView: View {
     let contact: Contact
-    let opportunities: [Opportunity]
-    let followUps: [FollowUpTask]
     let editContact: () -> Void
     let editFollowUp: (FollowUpTask) -> Void
     let markFollowUpDone: (FollowUpTask) -> Void
@@ -206,11 +223,11 @@ private struct ContactDetailView: View {
     let deleteFollowUp: (FollowUpTask) -> Void
 
     private var contactOpportunities: [Opportunity] {
-        opportunities.filter { $0.contactID == contact.id }
+        contact.opportunities.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     private var contactFollowUps: [FollowUpTask] {
-        followUps.filter { $0.contactID == contact.id }
+        contact.followUps.sorted(by: FollowUpTask.dueDateOrder)
     }
 
     var body: some View {

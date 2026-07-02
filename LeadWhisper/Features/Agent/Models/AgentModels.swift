@@ -20,9 +20,9 @@ struct AgentDraft: Sendable {
 }
 
 @Generable(description: "Extracted fact.")
-struct DetectedFact: Sendable {
-    @Guide(description: "contact, company, opportunity, budget, stage, followUp, tag, note, startDate.")
-    var kind: String
+struct DetectedFact: Sendable, Hashable {
+    @Guide(description: "Kind of extracted CRM fact.")
+    var kind: DetectedFactKind
 
     @Guide(description: "Human value.")
     var value: String
@@ -31,12 +31,25 @@ struct DetectedFact: Sendable {
     var detail: String
 }
 
+@Generable(description: "Kind of extracted CRM fact.")
+enum DetectedFactKind: String, Sendable, Hashable {
+    case contact
+    case company
+    case opportunity
+    case budget
+    case stage
+    case followUp
+    case tag
+    case note
+    case startDate
+}
+
 @Generable(description: "Proposed CRM mutation.")
 struct ProposedChange: Sendable, Identifiable {
     var id: String
 
-    @Guide(description: "createContact, updateContact, createOpportunity, updateOpportunityStage, createInteraction, createFollowUp, updateFollowUp, archiveFollowUps.")
-    var action: String
+    @Guide(description: "Allowed CRM mutation action.")
+    var action: ProposedChangeAction
 
     @Guide(description: "Card title.")
     var title: String
@@ -58,6 +71,18 @@ struct ProposedChange: Sendable, Identifiable {
     var dueDateText: String?
     var notes: String?
     var tags: [String]
+}
+
+@Generable(description: "Allowed CRM mutation action.")
+enum ProposedChangeAction: String, CaseIterable, Sendable, Hashable {
+    case createContact
+    case updateContact
+    case createOpportunity
+    case updateOpportunityStage
+    case createInteraction
+    case createFollowUp
+    case updateFollowUp
+    case archiveFollowUps
 }
 
 @Generable(description: "Clarification question.")
@@ -122,7 +147,7 @@ extension AgentDraft {
 
 extension ProposedChange {
     init(
-        action: String,
+        action: ProposedChangeAction,
         title: String,
         targetID: String? = nil,
         contactName: String? = nil,
