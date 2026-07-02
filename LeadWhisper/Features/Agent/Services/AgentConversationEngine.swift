@@ -28,6 +28,7 @@ final class AgentConversationEngine {
     /// processing bubble while a turn is in flight.
     private(set) var currentActivity: String?
     private(set) var contextWindowUsage: AgentContextWindowUsage
+    private(set) var contextWindowEvent: AgentContextWindowEvent?
 
     private let model = SystemLanguageModel.default
     private let toolDataSource: AgentToolDataSource
@@ -87,6 +88,7 @@ final class AgentConversationEngine {
         activeToolScope = nil
         contextMemory.reset()
         fallbackSessionTokens = 0
+        contextWindowEvent = nil
         pendingOutcomeNote = nil
         guidedWorkflow = nil
         userContext = ""
@@ -413,6 +415,12 @@ final class AgentConversationEngine {
         session = nil
         activeToolScope = nil
         fallbackSessionTokens = 0
+        if let event = AgentContextWindowEvent.sessionRefresh(
+            reason: reason,
+            memoryTokens: contextMemory.estimatedTokenCount
+        ) {
+            contextWindowEvent = event
+        }
         contextMemory.markSessionRefreshed()
         refreshContextWindowUsage()
         AppLog.agent.debug("Agent conversation session refreshed reason=\(reason, privacy: .public) memoryTokens=\(self.contextMemory.estimatedTokenCount, privacy: .public)")
@@ -516,28 +524,14 @@ final class AgentConversationEngine {
     }
 
     private static func instructions(toolScope: AgentToolScope) -> String {
-        let actions = ProposedChangeAction.allCases.map(\.rawValue).joined(separator: ", ")
-
         return """
-        You are LeadWhisper, a private on-device CRM assistant. You chat with the user about their local contacts, opportunities, and follow-ups, and you prepare CRM changes for review.
+        You are LeadWhisper, a private on-device CRM assistant. Draft reviewable local CRM changes only; never save or claim saved.
         Today: \(Date.now.formatted(date: .numeric, time: .omitted)).
-        Work in a ReAct loop each turn: think, optionally call available read-only tools, observe, then return one AgentTurn. Record final reasoning in thought.
-        Only use facts from the user's messages and from tool observations. Never invent contacts, opportunities, follow-ups, IDs, companies, budgets, dates, phone numbers, emails, or notes.
-        Available tools this turn: \(toolScope.toolNamesText). \(toolScope.guidance)
-        Use at most a few short lookups. Do not repeat a lookup. Ask one question instead of searching broadly.
-        kind=reply: short answer. kind=clarify: one question with 2-4 options and no changes. kind=propose: reviewable changes only; never say data was saved.
-        If the local CRM has no matching records, say so and offer to create a lead or ask for the missing exact record. Do not target a record that was not found.
-        Required before propose:
-        - createContact needs contactName and company.
-        - updateContact needs exactly one existing contact.
-        - createOpportunity needs contactName or company plus opportunityTitle; include stage when the user names one.
-        - updateOpportunity and updateOpportunityStage need exactly one existing opportunity.
-        - createFollowUp needs a contact or opportunity plus followUpTitle; include dueDateText when the user provides timing.
-        - updateFollowUp and completeFollowUp need exactly one existing follow-up.
-        - delete actions need exactly one existing local record with its UUID in targetID.
-        Stages: lead, qualified, proposalNeeded, proposalSent, won, lost.
-        Follow-up states: open, done, archived.
-        Actions: \(actions).
+        Return one AgentTurn with thought. Use only user/tool facts; never invent records, IDs, contact data, budgets, dates, or notes.
+        Tools: \(toolScope.instructionHint) Keep lookups short; do not repeat them. If records are missing or ambiguous, ask one focused question.
+        Kinds: reply=short answer; clarify=one question, no changes; propose=reviewable changes.
+        Before propose: createContact needs contactName+company; createOpportunity needs opportunityTitle+contactName/company; createFollowUp needs followUpTitle+contact/opportunity, dueDateText if given. Updates, completions, and deletes need one found local record with targetID=UUID.
+        Stages: lead, qualified, proposalNeeded, proposalSent, won, lost. Follow-ups: open, done, archived.
         """
     }
 
@@ -745,29 +739,24 @@ private enum AgentToolScope: String, Sendable {
     case pipeline
     case full
 
-    var toolNamesText: String {
-        let names = toolNames
-        return names.isEmpty ? "none" : names.joined(separator: ", ")
-    }
-
     var toolCount: Int {
         toolNames.count
     }
 
-    var guidance: String {
+    var instructionHint: String {
         switch self {
         case .none:
-            "No lookup tools are available. Propose only from user-provided facts or ask one clarification."
+            "No lookup tools are attached; draft from user facts or clarify."
         case .contacts:
-            "Use contact tools only when an existing contact must be identified or read."
+            "Use contact lookup only to identify/read an existing contact."
         case .opportunities:
-            "Use opportunity search only when an existing opportunity must be identified."
+            "Use opportunity lookup only to identify an existing opportunity."
         case .followUps:
-            "Use follow-up search only when an existing task must be identified."
+            "Use follow-up lookup only to identify an existing task."
         case .pipeline:
-            "Use the pipeline summary for counts, workload, and due-date overview questions."
+            "Use pipeline summary for counts, workload, and due-date overview."
         case .full:
-            "Use lookup tools only for existing records, pipeline questions, or disambiguation."
+            "Use lookup tools only for exact existing records, pipeline facts, or disambiguation."
         }
     }
 

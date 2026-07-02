@@ -72,6 +72,7 @@ struct AgentComposerView: View {
                     isProcessing: isProcessing,
                     accessibilityReduceMotion: accessibilityReduceMotion,
                     contextUsage: engine.contextWindowUsage,
+                    contextEvent: engine.contextWindowEvent,
                     send: { submitDraftText() },
                     toggleRecording: toggleRecording
                 )
@@ -579,6 +580,7 @@ private struct AgentInputBar: View {
     let isProcessing: Bool
     let accessibilityReduceMotion: Bool
     let contextUsage: AgentContextWindowUsage
+    let contextEvent: AgentContextWindowEvent?
     let send: () -> Void
     let toggleRecording: () -> Void
 
@@ -635,6 +637,11 @@ private struct AgentInputBar: View {
                 .padding(.leading, 2)
 
                 Spacer(minLength: 0)
+                if let contextEvent {
+                    ContextWindowEventChip(event: contextEvent)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        .layoutPriority(2)
+                }
                 ContextWindowUsageRing(usage: contextUsage)
                 ComposerIconButton(
                     systemImage: "arrow.up",
@@ -653,6 +660,7 @@ private struct AgentInputBar: View {
         }
         .shadow(color: .black.opacity(0.08), radius: 18, x: 0, y: 8)
         .beamBorder(beamConfiguration, isEnabled: (isRecording || isProcessing) && !accessibilityReduceMotion)
+        .animation(.snappy(duration: 0.18), value: contextEvent?.id)
     }
 
     private var statusLine: String {
@@ -660,6 +668,39 @@ private struct AgentInputBar: View {
             return "Listening..."
         }
         return statusMessage
+    }
+}
+
+private struct ContextWindowEventChip: View {
+    let event: AgentContextWindowEvent
+
+    private var tint: Color {
+        switch event.kind {
+        case .condensed:
+            .orange
+        case .refreshed:
+            .blue
+        }
+    }
+
+    var body: some View {
+        Label {
+            Text(event.title)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+        } icon: {
+            Image(systemName: event.systemImage)
+                .font(.caption2.weight(.bold))
+        }
+        .labelStyle(.titleAndIcon)
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(tint.opacity(0.12), in: Capsule())
+        .accessibilityLabel("Context window event")
+        .accessibilityValue(event.accessibilityValue)
+        .help(event.detail)
     }
 }
 

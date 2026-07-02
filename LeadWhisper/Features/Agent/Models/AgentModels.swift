@@ -202,6 +202,44 @@ struct AgentContextWindowUsage: Sendable, Hashable {
     }
 }
 
+struct AgentContextWindowEvent: Identifiable, Sendable, Hashable {
+    enum Kind: Sendable, Hashable {
+        case condensed
+        case refreshed
+    }
+
+    let id = UUID()
+    var kind: Kind
+    var title: String
+    var detail: String
+    var systemImage: String
+
+    var accessibilityValue: String {
+        "\(title). \(detail)"
+    }
+
+    static func sessionRefresh(reason: String, memoryTokens: Int) -> AgentContextWindowEvent? {
+        switch reason {
+        case "contextOverflow":
+            AgentContextWindowEvent(
+                kind: .condensed,
+                title: "Compacted",
+                detail: "Context window exceeded; a new session continued from compact memory. Memory tokens: \(memoryTokens).",
+                systemImage: "arrow.triangle.2.circlepath"
+            )
+        case "rollingWindow":
+            AgentContextWindowEvent(
+                kind: .refreshed,
+                title: "Refreshed",
+                detail: "The chat continued in a fresh session from compact memory. Memory tokens: \(memoryTokens).",
+                systemImage: "clock.arrow.circlepath"
+            )
+        default:
+            nil
+        }
+    }
+}
+
 struct AgentTimelineItem: Identifiable, Hashable {
     let id = UUID()
     var title: String
