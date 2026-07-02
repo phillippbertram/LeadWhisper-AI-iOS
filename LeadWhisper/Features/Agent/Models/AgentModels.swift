@@ -2,14 +2,14 @@ import Foundation
 import FoundationModels
 
 @Generable
-enum AgentTurnKind: String, Sendable, Hashable {
+enum AgentTurnKind: String, Codable, Sendable, Hashable {
     case reply
     case clarify
     case propose
 }
 
 @Generable
-struct AgentTurn: Sendable {
+struct AgentTurn: Codable, Sendable {
     @Guide(description: "One or two short sentences.")
     var thought: String
 
@@ -41,7 +41,7 @@ struct AgentDraft: Sendable {
 }
 
 @Generable
-struct DetectedFact: Sendable, Hashable {
+struct DetectedFact: Codable, Sendable, Hashable {
     var kind: DetectedFactKind
 
     var value: String
@@ -51,7 +51,7 @@ struct DetectedFact: Sendable, Hashable {
 }
 
 @Generable
-enum DetectedFactKind: String, Sendable, Hashable {
+enum DetectedFactKind: String, Codable, Sendable, Hashable {
     case contact
     case company
     case opportunity
@@ -64,7 +64,7 @@ enum DetectedFactKind: String, Sendable, Hashable {
 }
 
 @Generable
-struct ProposedChange: Sendable, Identifiable {
+struct ProposedChange: Codable, Sendable, Identifiable {
     var id: String
 
     var action: ProposedChangeAction
@@ -97,7 +97,7 @@ struct ProposedChange: Sendable, Identifiable {
 }
 
 @Generable
-enum ProposedChangeAction: String, CaseIterable, Sendable, Hashable {
+enum ProposedChangeAction: String, CaseIterable, Codable, Sendable, Hashable {
     case createContact
     case updateContact
     case createOpportunity
@@ -114,7 +114,7 @@ enum ProposedChangeAction: String, CaseIterable, Sendable, Hashable {
 }
 
 @Generable
-struct ClarificationPrompt: Sendable {
+struct ClarificationPrompt: Codable, Sendable {
     var question: String
 
     @Guide(.minimumCount(2), .maximumCount(4))
@@ -157,6 +157,7 @@ struct ProposedChangeDiffField: Identifiable, Hashable {
 /// UserDefaults keys for agent UI preferences.
 enum AgentSettings {
     static let debugModeKey = "agentDebugModeEnabled"
+    static let providerKindKey = "agentProviderKind"
 }
 
 struct AgentContextWindowUsage: Sendable, Hashable {
@@ -273,6 +274,160 @@ enum AgentDraftError: LocalizedError {
 }
 
 extension AgentTurn {
+    static var openAIJSONSchema: JSONValue {
+        .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "thought": .object([
+                    "type": .string("string"),
+                    "description": .string("One or two short sentences. Do not include private hidden reasoning; summarize the decision briefly.")
+                ]),
+                "kind": .object([
+                    "type": .string("string"),
+                    "enum": .stringArray([AgentTurnKind.reply.rawValue, AgentTurnKind.clarify.rawValue, AgentTurnKind.propose.rawValue])
+                ]),
+                "message": .object([
+                    "type": .string("string"),
+                    "description": .string("Short user-visible message.")
+                ]),
+                "clarification": clarificationSchema,
+                "detectedFacts": .object([
+                    "type": .string("array"),
+                    "maxItems": .number(6),
+                    "items": detectedFactSchema
+                ]),
+                "proposedChanges": .object([
+                    "type": .string("array"),
+                    "maxItems": .number(6),
+                    "items": proposedChangeSchema
+                ]),
+                "spokenConfirmation": .nullableString()
+            ]),
+            "required": .stringArray(["thought", "kind", "message", "clarification", "detectedFacts", "proposedChanges", "spokenConfirmation"])
+        ])
+    }
+
+    private static var detectedFactSchema: JSONValue {
+        .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "kind": .object([
+                    "type": .string("string"),
+                    "enum": .stringArray([
+                        DetectedFactKind.contact.rawValue,
+                        DetectedFactKind.company.rawValue,
+                        DetectedFactKind.opportunity.rawValue,
+                        DetectedFactKind.budget.rawValue,
+                        DetectedFactKind.stage.rawValue,
+                        DetectedFactKind.followUp.rawValue,
+                        DetectedFactKind.tag.rawValue,
+                        DetectedFactKind.note.rawValue,
+                        DetectedFactKind.startDate.rawValue
+                    ])
+                ]),
+                "value": .object(["type": .string("string")]),
+                "detail": .object(["type": .string("string")])
+            ]),
+            "required": .stringArray(["kind", "value", "detail"])
+        ])
+    }
+
+    private static var clarificationSchema: JSONValue {
+        .object([
+            "type": .array([.string("object"), .string("null")]),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "question": .object(["type": .string("string")]),
+                "options": .object([
+                    "type": .string("array"),
+                    "minItems": .number(2),
+                    "maxItems": .number(4),
+                    "items": .object(["type": .string("string")])
+                ]),
+                "allowsFreeText": .nullableBoolean(),
+                "placeholder": .nullableString()
+            ]),
+            "required": .stringArray(["question", "options", "allowsFreeText", "placeholder"])
+        ])
+    }
+
+    private static var proposedChangeSchema: JSONValue {
+        .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "id": .object(["type": .string("string")]),
+                "action": .object([
+                    "type": .string("string"),
+                    "enum": .stringArray(ProposedChangeAction.allCases.map(\.rawValue))
+                ]),
+                "title": .object(["type": .string("string")]),
+                "targetID": .nullableString(description: "Existing local UUID for updates and destructive changes."),
+                "contactName": .nullableString(),
+                "company": .nullableString(),
+                "role": .nullableString(),
+                "email": .nullableString(),
+                "phone": .nullableString(),
+                "opportunityTitle": .nullableString(),
+                "stage": .object([
+                    "type": .array([.string("string"), .string("null")]),
+                    "enum": .array([
+                        .string("lead"),
+                        .string("qualified"),
+                        .string("proposalNeeded"),
+                        .string("proposalSent"),
+                        .string("won"),
+                        .string("lost"),
+                        .null
+                    ])
+                ]),
+                "estimatedValueEUR": .nullableInteger(),
+                "budgetText": .nullableString(),
+                "expectedStart": .nullableString(),
+                "followUpTitle": .nullableString(),
+                "dueDateText": .nullableString(),
+                "followUpState": .object([
+                    "type": .array([.string("string"), .string("null")]),
+                    "enum": .array([
+                        .string("open"),
+                        .string("done"),
+                        .string("archived"),
+                        .null
+                    ])
+                ]),
+                "notes": .nullableString(),
+                "tags": .object([
+                    "type": .string("array"),
+                    "maxItems": .number(5),
+                    "items": .object(["type": .string("string")])
+                ])
+            ]),
+            "required": .stringArray([
+                "id",
+                "action",
+                "title",
+                "targetID",
+                "contactName",
+                "company",
+                "role",
+                "email",
+                "phone",
+                "opportunityTitle",
+                "stage",
+                "estimatedValueEUR",
+                "budgetText",
+                "expectedStart",
+                "followUpTitle",
+                "dueDateText",
+                "followUpState",
+                "notes",
+                "tags"
+            ])
+        ])
+    }
+
     /// Trusts the generated content over the declared kind so a mislabeled
     /// turn still renders safely.
     var resolvedKind: AgentTurnKind {

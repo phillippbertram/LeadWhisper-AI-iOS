@@ -26,9 +26,28 @@ extension Container {
     }
 
     @MainActor
+    var agentCredentialStore: Factory<AgentCredentialStore> {
+        self {
+            AgentCredentialStore()
+        }
+        .singleton
+    }
+
+    @MainActor
+    var agentModelClientRegistry: Factory<AgentModelClientRegistry> {
+        self {
+            AgentModelClientRegistry(credentialStore: self.agentCredentialStore())
+        }
+        .singleton
+    }
+
+    @MainActor
     var agentConversationEngine: Factory<AgentConversationEngine> {
         self {
-            AgentConversationEngine(toolDataSource: self.agentToolDataSource())
+            AgentConversationEngine(
+                toolDataSource: self.agentToolDataSource(),
+                modelRegistry: self.agentModelClientRegistry()
+            )
         }
     }
 

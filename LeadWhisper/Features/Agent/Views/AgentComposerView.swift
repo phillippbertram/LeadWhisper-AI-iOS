@@ -9,6 +9,7 @@ struct AgentComposerView: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @AppStorage(AgentSettings.providerKindKey) private var selectedProviderRawValue = AgentProviderKind.appleFoundationModels.rawValue
     @FocusState private var isInputFocused: Bool
     @State private var voiceInput = VoiceInputService()
     @State private var engine = Container.shared.agentConversationEngine()
@@ -73,6 +74,7 @@ struct AgentComposerView: View {
                     accessibilityReduceMotion: accessibilityReduceMotion,
                     contextUsage: engine.contextWindowUsage,
                     contextEvent: engine.contextWindowEvent,
+                    providerStatusMessage: providerStatusMessage,
                     send: { submitDraftText() },
                     toggleRecording: toggleRecording
                 )
@@ -94,6 +96,9 @@ struct AgentComposerView: View {
             }
             .onChange(of: isProcessing) { _, _ in
                 scrollToBottom(proxy)
+            }
+            .onChange(of: selectedProviderRawValue) { _, _ in
+                resetConversation()
             }
         }
         .crmErrorAlert($actionError)
@@ -121,7 +126,7 @@ struct AgentComposerView: View {
                     Label("Privacy", systemImage: "lock.shield")
                 }
                 .popover(isPresented: $showsPrivacyInfo) {
-                    AgentPrivacyPopover(availabilityMessage: engine.availabilityMessage)
+                    AgentPrivacyPopover(providerKind: selectedProviderKind, availabilityMessage: engine.availabilityMessage)
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -147,6 +152,19 @@ struct AgentComposerView: View {
             !draftText.isEmpty ||
             isProcessing ||
             activeResultID != nil
+    }
+
+    private var selectedProviderKind: AgentProviderKind {
+        AgentProviderKind(rawValue: selectedProviderRawValue) ?? .appleFoundationModels
+    }
+
+    private var providerStatusMessage: String {
+        switch selectedProviderKind {
+        case .appleFoundationModels:
+            "Apple on-device model"
+        case .openAI:
+            "OpenAI cloud model"
+        }
     }
 
     private var activeReviewResult: AgentRunResult? {
@@ -538,16 +556,17 @@ private struct ProcessingBubble: View {
 }
 
 private struct AgentPrivacyPopover: View {
+    let providerKind: AgentProviderKind
     let availabilityMessage: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Private CRM agent", systemImage: "lock.shield")
+            Label(title, systemImage: providerKind.privacySystemImage)
                 .font(.subheadline.weight(.semibold))
             Text(availabilityMessage)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            Text("Everything runs on this device. Proposed changes are only saved after you review them.")
+            Text(detail)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -555,6 +574,24 @@ private struct AgentPrivacyPopover: View {
         .padding(16)
         .frame(maxWidth: 300, alignment: .leading)
         .presentationCompactAdaptation(.popover)
+    }
+
+    private var title: String {
+        switch providerKind {
+        case .appleFoundationModels:
+            "Private CRM agent"
+        case .openAI:
+            "Cloud CRM agent"
+        }
+    }
+
+    private var detail: String {
+        switch providerKind {
+        case .appleFoundationModels:
+            "Everything runs on this device. Proposed changes are only saved after you review them."
+        case .openAI:
+            "Agent messages and local CRM lookup results are sent to OpenAI. Proposed changes are still only saved after you review them."
+        }
     }
 }
 
@@ -581,6 +618,7 @@ private struct AgentInputBar: View {
     let accessibilityReduceMotion: Bool
     let contextUsage: AgentContextWindowUsage
     let contextEvent: AgentContextWindowEvent?
+    let providerStatusMessage: String
     let send: () -> Void
     let toggleRecording: () -> Void
 
@@ -667,7 +705,10 @@ private struct AgentInputBar: View {
         if isRecording {
             return "Listening..."
         }
-        return statusMessage
+        if statusMessage.nilIfBlank == nil {
+            return providerStatusMessage
+        }
+        return "\(providerStatusMessage) - \(statusMessage)"
     }
 }
 
