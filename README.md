@@ -12,6 +12,7 @@ The app is built around a simple idea: after a call, meeting, or quick thought, 
 - Track opportunities by stage, expected start, budget, and related contact.
 - Keep follow-up tasks visible in a Today view.
 - Save an activity trail for important changes.
+- Watch Foundation Models context-window usage while composing.
 - Load demo data to try ambiguity handling and common CRM flows quickly.
 
 ## AI And Privacy
@@ -27,6 +28,7 @@ The Agent tab is a small on-device deep agent: the model - not a scripted workfl
 ```mermaid
 flowchart TD
     U[User message] --> E[AgentConversationEngine<br/>persistent LanguageModelSession]
+    E --> M[AgentContextMemory<br/>compact rolling continuity]
     E --> R{ReAct loop}
     R -->|Action| T[Read-only tools<br/>findContacts / findOpportunities / findFollowUps<br/>getContactDetails / getPipelineSummary]
     T -->|Observation| R
@@ -40,7 +42,11 @@ flowchart TD
     X --> D[(SwiftData)]
 ```
 
-- **One session per conversation.** Follow-up answers are real model turns with full context. On context-window overflow the engine condenses the conversation and retries once.
+- **The context-window problem.** A Foundation Models session has a fixed context window. Apple currently documents 4096 tokens for the on-device model, but LeadWhisper reads `SystemLanguageModel.contextSize` dynamically so the app can adapt to OS, model, or hardware changes. Every instruction, prompt, tool definition, tool output, generable schema, model response, and prior turn consumes part of that window. Long CRM conversations are especially sensitive because read-only lookup tools are useful, but their definitions and observations add token pressure. Once the window is exceeded, the session cannot continue reliably without trimming history or starting fresh with condensed state.
+- **Context-window management.** The engine uses the iOS 26.4+ Foundation Models token-count APIs to measure instructions, tools, prompts, the active session transcript, and the `AgentTurn` schema. It keeps a 900-token response reserve separate from the measured context and falls back to a rough estimate if token counting fails. The composer shows a compact progress meter with remaining tokens while the user types or dictates.
+- **Compact memory instead of full history.** The session is refreshed after drafts, save/cancel outcomes, overflow recovery, and rolling turns. `AgentContextMemory` carries only recent turns, open clarifications, relevant local IDs, and draft outcomes into the next session.
+- **Dynamic tool scope.** The engine attaches only the lookup tools that fit the current intent when possible, reducing tool-definition overhead for create flows, pipeline questions, and focused contact/opportunity/follow-up updates.
+- **One active model session.** Follow-up answers are real model turns with compact continuity. On context-window overflow the engine restarts with structured memory and retries once.
 - **ReAct trace.** Every turn records a thought plus the action/observation sequence. The trace is visible behind a "Details" disclosure on each card, or always with the "Show Agent Reasoning" toggle in Settings.
 - **Loop guards.** A per-turn lookup budget and a cap on consecutive clarification rounds keep the loop convergent - the LangChain `max_iterations` and early-stopping ideas applied to Foundation Models.
 - **Review before save.** The model only proposes. `ChangeDiffBuilder` resolves the targeted records and shows old-to-new diffs, individual changes can be deselected, and destructive changes require an extra confirmation before `ChangeExecutor` mutates SwiftData.

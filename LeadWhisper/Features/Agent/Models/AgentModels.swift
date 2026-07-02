@@ -166,10 +166,19 @@ struct AgentContextWindowUsage: Sendable, Hashable {
     var memoryTokens: Int
     var responseReserveTokens: Int
     var toolScope: String
+    var isEstimated: Bool = false
+
+    var availableTokens: Int {
+        max(0, maximumTokens - usedTokens - responseReserveTokens)
+    }
+
+    var budgetedTokens: Int {
+        min(maximumTokens, usedTokens + responseReserveTokens)
+    }
 
     var fraction: Double {
         guard maximumTokens > 0 else { return 0 }
-        return min(1, max(0, Double(usedTokens) / Double(maximumTokens)))
+        return min(1, max(0, Double(budgetedTokens) / Double(maximumTokens)))
     }
 
     var percentage: Int {
@@ -177,7 +186,8 @@ struct AgentContextWindowUsage: Sendable, Hashable {
     }
 
     var accessibilityValue: String {
-        "Estimated \(percentage) percent, \(usedTokens) of \(maximumTokens) tokens."
+        let prefix = isEstimated ? "Estimated " : ""
+        return "\(prefix)\(percentage) percent, \(availableTokens) tokens available, \(usedTokens) of \(maximumTokens) tokens in context, \(responseReserveTokens) reserved for the next answer."
     }
 
     static func empty(maximumTokens: Int) -> AgentContextWindowUsage {

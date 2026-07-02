@@ -71,7 +71,7 @@ struct AgentComposerView: View {
                     statusMessage: voiceInput.statusMessage,
                     isProcessing: isProcessing,
                     accessibilityReduceMotion: accessibilityReduceMotion,
-                    contextUsage: engine.contextWindowUsage(for: draftText),
+                    contextUsage: engine.contextWindowUsage,
                     send: { submitDraftText() },
                     toggleRecording: toggleRecording
                 )
@@ -82,7 +82,11 @@ struct AgentComposerView: View {
             }
             .onAppear {
                 refreshSuggestions()
+                engine.refreshContextWindowUsage(for: draftText)
                 scrollToBottom(proxy)
+            }
+            .onChange(of: draftText) { _, newValue in
+                engine.refreshContextWindowUsage(for: newValue, debounce: true)
             }
             .onChange(of: messages.count) { _, _ in
                 scrollToBottom(proxy)
@@ -144,6 +148,19 @@ struct AgentComposerView: View {
             activeResultID != nil
     }
 
+    private var activeReviewResult: AgentRunResult? {
+        guard let activeResultID else { return nil }
+        return messages.compactMap { message -> AgentRunResult? in
+            guard case .result(let runResult, _) = message.content,
+                  runResult.id == activeResultID,
+                  runResult.draft.canApply else {
+                return nil
+            }
+            return runResult
+        }
+        .first
+    }
+
     private func refreshSuggestions() {
         do {
             let snapshot = try Container.shared.crmRepository().snapshot()
@@ -164,6 +181,11 @@ struct AgentComposerView: View {
 
         if voiceInput.isRecording {
             voiceInput.stopRecording()
+        }
+
+        if activeReviewResult != nil {
+            engine.noteDraftCancelled()
+            activeTranscript = ""
         }
 
         draftText = ""
@@ -668,9 +690,9 @@ private struct ContextWindowUsageRing: View {
                 .foregroundStyle(tint)
         }
         .frame(width: 26, height: 26)
-        .accessibilityLabel("Estimated context window usage")
+        .accessibilityLabel("Context window usage")
         .accessibilityValue(usage.accessibilityValue)
-        .help("Estimated context: \(usage.usedTokens)/\(usage.maximumTokens) tokens")
+        .help("Context: \(usage.usedTokens)/\(usage.maximumTokens) tokens, \(usage.availableTokens) available")
     }
 }
 

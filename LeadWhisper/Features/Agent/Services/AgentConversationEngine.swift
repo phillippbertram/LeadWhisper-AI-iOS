@@ -18,6 +18,7 @@ final class AgentConversationEngine {
     private enum Limits {
         static let toolCallsPerTurn = 6
         static let consecutiveClarifications = 3
+        static let repeatedClarificationRetries = 1
         static let turnTimeoutSeconds = 20
         static let userContextLines = 8
         static let responseTokens = 900
@@ -32,7 +33,7 @@ final class AgentConversationEngine {
     private let toolDataSource: AgentToolDataSource
     @ObservationIgnored private var session: LanguageModelSession?
     @ObservationIgnored private var activeToolScope: AgentToolScope?
-    @ObservationIgnored private var activeSessionTokens = 0
+    @ObservationIgnored private var fallbackSessionTokens = 0
     @ObservationIgnored private var contextMemory = AgentContextMemory()
     @ObservationIgnored private var pendingOutcomeNote: String?
     @ObservationIgnored private var guidedWorkflow: AgentGuidedWorkflow?
@@ -40,6 +41,9 @@ final class AgentConversationEngine {
     @ObservationIgnored private var toolCallsThisTurn = 0
     @ObservationIgnored private var toolCallCounts: [String: Int] = [:]
     @ObservationIgnored private var consecutiveClarifications = 0
+    @ObservationIgnored private var lastClarificationKey: String?
+    @ObservationIgnored private var repeatedClarificationCount = 0
+    @ObservationIgnored private var contextUsageTask: Task<Void, Never>?
 
     init(toolDataSource: AgentToolDataSource) {
         self.toolDataSource = toolDataSource
@@ -50,9 +54,22 @@ final class AgentConversationEngine {
         Self.availabilityMessage(for: model.availability)
     }
 
-    func contextWindowUsage(for draftText: String) -> AgentContextWindowUsage {
-        _ = contextWindowUsage
-        return estimatedContextWindowUsage(for: draftText)
+    deinit {
+        contextUsageTask?.cancel()
+    }
+
+    func refreshContextWindowUsage(for draftText: String = "", debounce: Bool = false) {
+        contextUsageTask?.cancel()
+        contextUsageTask = Task { @MainActor [weak self] in
+            if debounce {
+                do {
+                    try await Task.sleep(for: .milliseconds(220))
+                } catch {
+                    return
+                }
+            }
+            await self?.updateContextWindowUsage(for: draftText)
+        }
     }
 
     /// Warms the shared on-device model ahead of the first request. Call this
@@ -60,6 +77,7 @@ final class AgentConversationEngine {
     func prewarm() {
         guard model.isAvailable else { return }
         ensureSession(toolScope: .full).prewarm()
+        refreshContextWindowUsage()
         AppLog.agent.debug("SystemLanguageModel prewarm requested at UI appear")
     }
 
@@ -68,14 +86,14 @@ final class AgentConversationEngine {
         session = nil
         activeToolScope = nil
         contextMemory.reset()
-        activeSessionTokens = 0
+        fallbackSessionTokens = 0
         pendingOutcomeNote = nil
         guidedWorkflow = nil
         userContext = ""
         toolCallsThisTurn = 0
         toolCallCounts = [:]
-        consecutiveClarifications = 0
-        updateContextWindowUsage()
+        resetClarificationTracking()
+        refreshContextWindowUsage()
         AppLog.agent.debug("Agent conversation engine reset")
     }
 
@@ -83,18 +101,20 @@ final class AgentConversationEngine {
     /// hear whether the user actually saved them.
     func noteDraftSaved() {
         pendingOutcomeNote = "The user saved the proposed changes."
+        guidedWorkflow = nil
         contextMemory.recordOutcome(.saved)
-        consecutiveClarifications = 0
+        resetClarificationTracking()
         refreshSession(reason: "draftSaved")
-        updateContextWindowUsage()
+        refreshContextWindowUsage()
     }
 
     func noteDraftCancelled() {
         pendingOutcomeNote = "The user cancelled the proposed changes."
+        guidedWorkflow = nil
         contextMemory.recordOutcome(.cancelled)
-        consecutiveClarifications = 0
+        resetClarificationTracking()
         refreshSession(reason: "draftCancelled")
-        updateContextWindowUsage()
+        refreshContextWindowUsage()
     }
 
     func send(_ message: String) async -> AgentRunResult {
@@ -102,7 +122,7 @@ final class AgentConversationEngine {
         currentActivity = nil
         toolCallsThisTurn = 0
         toolCallCounts = [:]
-        updateContextWindowUsage(for: message)
+        contextUsageTask?.cancel()
         defer { currentActivity = nil }
 
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -114,50 +134,54 @@ final class AgentConversationEngine {
         if var workflow = guidedWorkflow {
             let response = workflow.advance(trimmed, snapshot: snapshot, availabilityMessage: availabilityMessage)
             guidedWorkflow = response.workflow
-            return finalize(response.result, snapshot: snapshot, userMessage: trimmed)
+            return await finalize(response.result, snapshot: snapshot, userMessage: trimmed)
         }
 
         if let response = AgentGuidedWorkflow.start(message: trimmed, snapshot: snapshot, availabilityMessage: availabilityMessage) {
             guidedWorkflow = response.workflow
-            return finalize(response.result, snapshot: snapshot, userMessage: trimmed)
+            return await finalize(response.result, snapshot: snapshot, userMessage: trimmed)
         }
 
         guard model.isAvailable else {
-            return unavailableResult()
+            return await resultWithContextRefresh(unavailableResult())
         }
 
         let toolScope = AgentToolScope.infer(from: trimmed)
+        let outboundPrompt = prompt(for: trimmed)
+        await updateContextWindowUsage(promptText: outboundPrompt, toolScope: toolScope)
         do {
-            let result = try await respondWithTimeout(to: prompt(for: trimmed), condensed: false, toolScope: toolScope)
-            return finalize(result, snapshot: snapshot, userMessage: trimmed)
+            let result = try await respondWithTimeout(to: outboundPrompt, condensed: false, toolScope: toolScope)
+            return await finalize(result, snapshot: snapshot, userMessage: trimmed)
         } catch {
             if Self.isToolBudgetError(error) {
-                return toolBudgetResult()
+                return await resultWithContextRefresh(toolBudgetResult())
             }
             if error is AgentTurnTimeout {
                 session = nil
-                return timeoutResult()
+                return await resultWithContextRefresh(timeoutResult())
             }
             guard Self.isContextWindowError(error) else {
-                return failureResult(for: error, exceededContext: false)
+                return await resultWithContextRefresh(failureResult(for: error, exceededContext: false))
             }
 
             // The on-device context window is small. Drop the full transcript
             // and retry once in a fresh session so long conversations recover.
             AppLog.agent.info("Agent context window exceeded; condensing conversation")
             refreshSession(reason: "contextOverflow")
+            let condensed = condensedPrompt(for: trimmed)
+            await updateContextWindowUsage(promptText: condensed, toolScope: toolScope)
             do {
-                let result = try await respondWithTimeout(to: condensedPrompt(for: trimmed), condensed: true, toolScope: toolScope)
-                return finalize(result, snapshot: snapshot, userMessage: trimmed)
+                let result = try await respondWithTimeout(to: condensed, condensed: true, toolScope: toolScope)
+                return await finalize(result, snapshot: snapshot, userMessage: trimmed)
             } catch {
                 if Self.isToolBudgetError(error) {
-                    return toolBudgetResult()
+                    return await resultWithContextRefresh(toolBudgetResult())
                 }
                 if error is AgentTurnTimeout {
                     session = nil
-                    return timeoutResult()
+                    return await resultWithContextRefresh(timeoutResult())
                 }
-                return failureResult(for: error, exceededContext: Self.isContextWindowError(error))
+                return await resultWithContextRefresh(failureResult(for: error, exceededContext: Self.isContextWindowError(error)))
             }
         }
     }
@@ -168,26 +192,91 @@ final class AgentConversationEngine {
         userContext = lines.joined(separator: "\n")
     }
 
-    private func finalize(_ result: AgentRunResult, snapshot: CRMDataSnapshot, userMessage: String) -> AgentRunResult {
+    private func finalize(_ result: AgentRunResult, snapshot: CRMDataSnapshot, userMessage: String) async -> AgentRunResult {
         let validated = AgentDraftValidator.validate(
             result,
             userContext: userContext,
             snapshot: snapshot,
             availabilityMessage: availabilityMessage
         )
+        let guarded = applyClarificationGuard(to: validated)
         if !userMessage.isEmpty {
             contextMemory.recordUserMessage(userMessage)
         }
-        contextMemory.record(validated)
+        contextMemory.record(guarded.result)
 
-        if validated.kind == .propose {
+        if guarded.result.kind == .propose {
             refreshSession(reason: "draftPrepared")
+        } else if guarded.stoppedLoop {
+            refreshSession(reason: "clarificationLimit")
         } else if contextMemory.shouldRefreshSession {
             refreshSession(reason: "rollingWindow")
         }
 
-        updateContextWindowUsage()
-        return validated
+        await updateContextWindowUsage()
+        return guarded.result
+    }
+
+    private func resultWithContextRefresh(_ result: AgentRunResult) async -> AgentRunResult {
+        await updateContextWindowUsage()
+        return result
+    }
+
+    private func applyClarificationGuard(to result: AgentRunResult) -> (result: AgentRunResult, stoppedLoop: Bool) {
+        guard result.kind == .clarify || result.draft.clarification != nil else {
+            resetClarificationTracking()
+            return (result, false)
+        }
+
+        consecutiveClarifications += 1
+
+        if let key = clarificationKey(for: result) {
+            if key == lastClarificationKey {
+                repeatedClarificationCount += 1
+            } else {
+                lastClarificationKey = key
+                repeatedClarificationCount = 0
+            }
+        } else {
+            lastClarificationKey = nil
+            repeatedClarificationCount = 0
+        }
+
+        if repeatedClarificationCount > Limits.repeatedClarificationRetries {
+            AppLog.agent.info("Agent repeated clarification limit reached; forced final reply")
+            return (terminalClarificationResult(from: result, reason: "Stopped the question round after the same clarification repeated."), true)
+        }
+
+        if consecutiveClarifications > Limits.consecutiveClarifications {
+            AppLog.agent.info("Agent clarification limit reached; forced final reply")
+            return (terminalClarificationResult(from: result, reason: "Stopped the question round after \(Limits.consecutiveClarifications) consecutive clarifications."), true)
+        }
+
+        return (result, false)
+    }
+
+    private func terminalClarificationResult(from result: AgentRunResult, reason: String) -> AgentRunResult {
+        guidedWorkflow = nil
+        resetClarificationTracking()
+
+        var terminal = result
+        terminal.kind = .reply
+        terminal.message = "I'm going to stop the question loop here. I couldn't prepare a reliable draft from the details so far. Send the contact, opportunity, or follow-up plus the change in one message, or make the edit manually in the app."
+        terminal.draft = .empty
+        terminal.errorMessage = nil
+        terminal.timeline.append(AgentTimelineItem(title: "Clarification limit reached", detail: reason, systemImage: "stop.circle"))
+        return terminal
+    }
+
+    private func clarificationKey(for result: AgentRunResult) -> String? {
+        let question = result.draft.clarification?.question.nilIfBlank ?? result.message.nilIfBlank
+        return question?.searchKey.nilIfBlank
+    }
+
+    private func resetClarificationTracking() {
+        consecutiveClarifications = 0
+        lastClarificationKey = nil
+        repeatedClarificationCount = 0
     }
 
     private func localSnapshot() async -> CRMDataSnapshot {
@@ -222,7 +311,7 @@ final class AgentConversationEngine {
 
     private func respond(to prompt: String, condensed: Bool, toolScope: AgentToolScope) async throws -> AgentRunResult {
         let session = ensureSession(toolScope: toolScope)
-        logContextBudget(prompt: prompt, toolScope: toolScope, condensed: condensed)
+        await logContextBudget(prompt: prompt, toolScope: toolScope, condensed: condensed)
 
         // Greedy sampling makes extraction deterministic; temperature has no
         // effect under greedy, so it is intentionally omitted.
@@ -234,35 +323,10 @@ final class AgentConversationEngine {
         )
 
         pendingOutcomeNote = nil
-        var turn = response.content
-        var kind = turn.resolvedKind
-        var timeline = timeline(from: response.transcriptEntries, thought: turn.thought, condensed: condensed)
-        activeSessionTokens += Self.roughTokenCount(prompt) +
-            Self.roughTokenCount(turn.message) +
-            Self.roughTokenCount(turn.thought) +
-            toolCallsThisTurn * 80
-
-        if kind == .clarify {
-            consecutiveClarifications += 1
-            if consecutiveClarifications > Limits.consecutiveClarifications {
-                // Forced final answer past the cap so question rounds converge.
-                let question = turn.clarification?.question.nilIfBlank
-                turn.clarification = nil
-                turn.proposedChanges = []
-                kind = .reply
-                turn.message = [
-                    turn.message.nilIfBlank,
-                    question,
-                    "I have asked a few questions already - send everything in one message and I will draft it, or make the change manually in the app."
-                ]
-                .compactMap(\.self)
-                .joined(separator: " ")
-                timeline.append(AgentTimelineItem(title: "Clarification limit reached", detail: "Stopped the question round after \(Limits.consecutiveClarifications) consecutive clarifications.", systemImage: "stop.circle"))
-                AppLog.agent.info("Agent clarification limit reached; forced final reply")
-            }
-        } else {
-            consecutiveClarifications = 0
-        }
+        let turn = response.content
+        let kind = turn.resolvedKind
+        let timeline = timeline(from: response.transcriptEntries, thought: turn.thought, condensed: condensed)
+        await refreshFallbackSessionTokens(session: session, prompt: prompt, turn: turn)
 
         AppLog.agent.info("Agent turn generated kind=\(kind.rawValue, privacy: .public) proposedChanges=\(turn.proposedChanges.count, privacy: .public) facts=\(turn.detectedFacts.count, privacy: .public) toolCalls=\(self.toolCallsThisTurn, privacy: .public)")
         return AgentRunResult(
@@ -287,10 +351,20 @@ final class AgentConversationEngine {
         let session = LanguageModelSession(model: model, tools: tools, instructions: instructions)
         self.session = session
         activeToolScope = toolScope
-        activeSessionTokens = Self.roughTokenCount(instructions) + toolScope.estimatedToolDefinitionTokens
-        updateContextWindowUsage()
+        fallbackSessionTokens = Self.roughTokenCount(instructions) + tools.count * 90
         AppLog.agent.debug("Agent conversation session created scope=\(toolScope.rawValue, privacy: .public) tools=\(tools.count, privacy: .public)")
         return session
+    }
+
+    private func refreshFallbackSessionTokens(session: LanguageModelSession, prompt: String, turn: AgentTurn) async {
+        do {
+            fallbackSessionTokens = try await measuredTranscriptTokens(for: session.transcript)
+        } catch {
+            fallbackSessionTokens += Self.roughTokenCount(prompt) +
+                Self.roughTokenCount(turn.message) +
+                Self.roughTokenCount(turn.thought) +
+                toolCallsThisTurn * 80
+        }
     }
 
     /// Wraps the lookup data source so the UI can show which lookup the model
@@ -338,22 +412,86 @@ final class AgentConversationEngine {
     private func refreshSession(reason: String) {
         session = nil
         activeToolScope = nil
-        activeSessionTokens = 0
+        fallbackSessionTokens = 0
         contextMemory.markSessionRefreshed()
+        refreshContextWindowUsage()
         AppLog.agent.debug("Agent conversation session refreshed reason=\(reason, privacy: .public) memoryTokens=\(self.contextMemory.estimatedTokenCount, privacy: .public)")
     }
 
-    private func updateContextWindowUsage(for draftText: String = "") {
-        contextWindowUsage = estimatedContextWindowUsage(for: draftText)
+    private func updateContextWindowUsage(for draftText: String = "") async {
+        let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolScope = activeToolScope ?? AgentToolScope.infer(from: trimmed)
+        await updateContextWindowUsage(promptText: prompt(for: trimmed), toolScope: toolScope)
+    }
+
+    private func updateContextWindowUsage(promptText: String, toolScope: AgentToolScope) async {
+        let fallback = estimatedContextWindowUsage(promptText: promptText, toolScope: toolScope)
+        do {
+            let measured = try await measuredContextWindowUsage(promptText: promptText, toolScope: toolScope)
+            guard !Task.isCancelled else { return }
+            contextWindowUsage = measured
+        } catch {
+            guard !Task.isCancelled else { return }
+            contextWindowUsage = fallback
+            AppLog.agent.warning("Agent context token count failed scope=\(toolScope.rawValue, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func measuredContextWindowUsage(promptText: String, toolScope: AgentToolScope) async throws -> AgentContextWindowUsage {
+        let promptTokens = try await model.tokenCount(for: Prompt(promptText))
+        let schemaTokens = try await model.tokenCount(for: AgentTurn.generationSchema)
+        let memoryTokens = try await measuredMemoryTokens()
+        let baseTokens: Int
+
+        if let session, activeToolScope == toolScope {
+            baseTokens = try await measuredTranscriptTokens(for: session.transcript)
+        } else {
+            let instructions = Instructions(Self.instructions(toolScope: toolScope))
+            let tools = toolScope.tools(dataSource: toolDataSource)
+            async let instructionsTokens = model.tokenCount(for: instructions)
+            async let toolsTokens = model.tokenCount(for: tools)
+            let countedInstructions = try await instructionsTokens
+            let countedTools = try await toolsTokens
+            baseTokens = countedInstructions + countedTools
+        }
+
+        return AgentContextWindowUsage(
+            usedTokens: min(model.contextSize, baseTokens + promptTokens + schemaTokens),
+            maximumTokens: model.contextSize,
+            inputTokens: promptTokens,
+            memoryTokens: memoryTokens,
+            responseReserveTokens: Limits.responseTokens,
+            toolScope: toolScope.rawValue,
+            isEstimated: false
+        )
+    }
+
+    /// Counts transcript entries with Apple's dedicated transcript token API.
+    /// `Transcript` itself is a collection, so the full session transcript can
+    /// be passed here without manually rebuilding entries.
+    private func measuredTranscriptTokens<Entries: Collection>(
+        for transcriptEntries: Entries
+    ) async throws -> Int where Entries.Element == Transcript.Entry {
+        try await model.tokenCount(for: transcriptEntries)
+    }
+
+    private func measuredMemoryTokens() async throws -> Int {
+        guard let memory = contextMemory.promptPrefix() else { return 0 }
+        return try await model.tokenCount(for: Prompt(memory))
     }
 
     private func estimatedContextWindowUsage(for draftText: String) -> AgentContextWindowUsage {
         let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         let toolScope = activeToolScope ?? AgentToolScope.infer(from: trimmed)
-        let instructionsTokens = Self.roughTokenCount(Self.instructions(toolScope: toolScope)) + toolScope.estimatedToolDefinitionTokens
-        let sessionTokens = activeToolScope == toolScope && activeSessionTokens > 0 ? activeSessionTokens : instructionsTokens
-        let inputTokens = Self.roughTokenCount(prompt(for: trimmed))
-        let usedTokens = min(model.contextSize, sessionTokens + inputTokens + Limits.responseTokens)
+        return estimatedContextWindowUsage(promptText: prompt(for: trimmed), toolScope: toolScope)
+    }
+
+    private func estimatedContextWindowUsage(promptText: String, toolScope: AgentToolScope) -> AgentContextWindowUsage {
+        let instructionsTokens = Self.roughTokenCount(Self.instructions(toolScope: toolScope)) + toolScope.toolCount * 90
+        let sessionTokens = activeToolScope == toolScope && fallbackSessionTokens > 0 ? fallbackSessionTokens : instructionsTokens
+        let inputTokens = Self.roughTokenCount(promptText)
+        let schemaTokens = Self.roughTokenCount(AgentTurn.generationSchema.debugDescription)
+        let usedTokens = min(model.contextSize, sessionTokens + inputTokens + schemaTokens)
 
         return AgentContextWindowUsage(
             usedTokens: usedTokens,
@@ -361,13 +499,15 @@ final class AgentConversationEngine {
             inputTokens: inputTokens,
             memoryTokens: contextMemory.estimatedTokenCount,
             responseReserveTokens: Limits.responseTokens,
-            toolScope: toolScope.rawValue
+            toolScope: toolScope.rawValue,
+            isEstimated: true
         )
     }
 
-    private func logContextBudget(prompt: String, toolScope: AgentToolScope, condensed: Bool) {
-        let instructions = Self.instructions(toolScope: toolScope)
-        AppLog.agent.debug("Agent context budget contextSize=\(self.model.contextSize, privacy: .public) instructionsTokens~\(Self.roughTokenCount(instructions), privacy: .public) promptTokens~\(Self.roughTokenCount(prompt), privacy: .public) memoryTokens~\(self.contextMemory.estimatedTokenCount, privacy: .public) responseLimit=\(Limits.responseTokens, privacy: .public) condensed=\(condensed, privacy: .public) scope=\(toolScope.rawValue, privacy: .public)")
+    private func logContextBudget(prompt: String, toolScope: AgentToolScope, condensed: Bool) async {
+        let fallback = estimatedContextWindowUsage(promptText: prompt, toolScope: toolScope)
+        let usage = (try? await measuredContextWindowUsage(promptText: prompt, toolScope: toolScope)) ?? fallback
+        AppLog.agent.debug("Agent context budget contextSize=\(usage.maximumTokens, privacy: .public) usedTokens=\(usage.usedTokens, privacy: .public) inputTokens=\(usage.inputTokens, privacy: .public) memoryTokens=\(usage.memoryTokens, privacy: .public) responseLimit=\(usage.responseReserveTokens, privacy: .public) availableTokens=\(usage.availableTokens, privacy: .public) estimated=\(usage.isEstimated, privacy: .public) condensed=\(condensed, privacy: .public) scope=\(toolScope.rawValue, privacy: .public)")
     }
 
     private static func roughTokenCount(_ text: String) -> Int {
@@ -411,6 +551,9 @@ final class AgentConversationEngine {
         }
         if consecutiveClarifications >= Limits.consecutiveClarifications {
             lines.append("Note: you already asked \(consecutiveClarifications) questions in a row. Do not ask another clarification. Reply or propose using what you have.")
+        }
+        if repeatedClarificationCount >= Limits.repeatedClarificationRetries {
+            lines.append("Note: you already repeated the same clarification. Do not ask that question again. Reply or propose using what you have.")
         }
         lines.append(message)
         return lines.joined(separator: "\n")
@@ -607,8 +750,8 @@ private enum AgentToolScope: String, Sendable {
         return names.isEmpty ? "none" : names.joined(separator: ", ")
     }
 
-    var estimatedToolDefinitionTokens: Int {
-        toolNames.count * 90
+    var toolCount: Int {
+        toolNames.count
     }
 
     var guidance: String {
