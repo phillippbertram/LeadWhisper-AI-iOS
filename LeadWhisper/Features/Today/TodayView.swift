@@ -1,9 +1,9 @@
+import FactoryKit
 import SwiftData
 import SwiftUI
 
 struct TodayView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.crmRepository) private var injectedRepository
+    @InjectedObject(\.crmRepository) private var crmRepository
     // "open" is FollowUpState.open.rawValue; #Predicate cannot reference the enum.
     @Query(filter: #Predicate<FollowUpTask> { $0.stateRaw == "open" })
     private var openTasks: [FollowUpTask]
@@ -115,7 +115,7 @@ struct TodayView: View {
 
     private func perform(_ action: (CRMRepository) throws -> Void) {
         do {
-            try action(injectedRepository.repository(fallback: modelContext))
+            try action(crmRepository)
         } catch {
             actionError = PresentableError(error)
         }

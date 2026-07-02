@@ -1,9 +1,9 @@
+import FactoryKit
 import SwiftData
 import SwiftUI
 
 struct OpportunitiesView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.crmRepository) private var injectedRepository
+    @InjectedObject(\.crmRepository) private var crmRepository
     @Query(sort: [SortDescriptor(\Opportunity.updatedAt, order: .reverse)])
     private var opportunities: [Opportunity]
     @State private var sheet: OpportunitiesSheet?
@@ -100,7 +100,7 @@ struct OpportunitiesView: View {
 
     private func perform(_ action: (CRMRepository) throws -> Void) {
         do {
-            try action(injectedRepository.repository(fallback: modelContext))
+            try action(crmRepository)
         } catch {
             actionError = PresentableError(error)
         }

@@ -86,6 +86,38 @@ extension DemoAgentParser {
         return tags
     }
 
+    static func detectEmail(in transcript: String) -> String? {
+        transcript
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:()[]<>")) }
+            .first { $0.contains("@") && $0.contains(".") }
+    }
+
+    static func detectPhone(in transcript: String) -> String? {
+        let words = transcript.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let index = words.firstIndex(where: { $0.searchKey.contains("phone") || $0.searchKey.contains("telefon") }) else {
+            return nil
+        }
+        let value = words.dropFirst(index + 1).prefix(3).joined(separator: " ")
+        return value.nilIfBlank
+    }
+
+    static func detectRole(in key: String) -> String? {
+        if key.contains("cto") {
+            return "CTO"
+        }
+        if key.contains("founder") || key.contains("grunder") || key.contains("gründer") {
+            return "Founder"
+        }
+        if key.contains("ceo") {
+            return "CEO"
+        }
+        if key.contains("product") {
+            return "Product"
+        }
+        return nil
+    }
+
     static func detectBudget(in key: String) -> Int? {
         if key.contains("20.000") || key.contains("20000") || key.contains("20,000") {
             return 20000

@@ -1,9 +1,9 @@
+import FactoryKit
 import SwiftData
 import SwiftUI
 
 struct FollowUpEditView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.crmRepository) private var injectedRepository
+    @InjectedObject(\.crmRepository) private var crmRepository
     @Environment(\.dismiss) private var dismiss
     let task: FollowUpTask
     @State private var draft: FollowUpEditDraft
@@ -64,10 +64,9 @@ struct FollowUpEditView: View {
         task.notes = draft.notes
         task.updatedAt = .now
 
-        let repository = injectedRepository.repository(fallback: modelContext)
-        repository.addActivity(title: "Follow-up updated", detail: task.title, entityKind: .followUp, entityID: task.id)
+        crmRepository.addActivity(title: "Follow-up updated", detail: task.title, entityKind: .followUp, entityID: task.id)
         do {
-            try repository.save()
+            try crmRepository.save()
             dismiss()
         } catch {
             saveError = PresentableError(error)

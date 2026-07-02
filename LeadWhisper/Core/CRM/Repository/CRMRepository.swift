@@ -1,9 +1,10 @@
+import Combine
 import Foundation
 import OSLog
 import SwiftData
 
 @MainActor
-final class CRMRepository {
+final class CRMRepository: ObservableObject {
     private let context: ModelContext
 
     init(context: ModelContext) {
@@ -30,41 +31,9 @@ final class CRMRepository {
     }
 
     func snapshot() throws -> CRMDataSnapshot {
-        let contactSnapshots = try contacts().map {
-            CRMContactSnapshot(
-                id: $0.id.uuidString,
-                fullName: $0.fullName,
-                company: $0.company,
-                notes: $0.notes,
-                tags: $0.tags
-            )
-        }
-
-        let opportunitySnapshots = try opportunities().map {
-            CRMOpportunitySnapshot(
-                id: $0.id.uuidString,
-                title: $0.title,
-                company: $0.company,
-                contactID: $0.contact?.id.uuidString,
-                stage: $0.stage.rawValue,
-                estimatedValueEUR: $0.estimatedValueEUR,
-                budgetText: $0.budgetText,
-                expectedStart: $0.expectedStart,
-                tags: $0.tags
-            )
-        }
-
-        let followUpSnapshots = try followUps().map {
-            CRMFollowUpSnapshot(
-                id: $0.id.uuidString,
-                title: $0.title,
-                contactID: $0.contact?.id.uuidString,
-                opportunityID: $0.opportunity?.id.uuidString,
-                dueDateText: $0.dueDateText,
-                notes: $0.notes,
-                state: $0.state.rawValue
-            )
-        }
+        let contactSnapshots = try contacts().map(Self.snapshot(for:))
+        let opportunitySnapshots = try opportunities().map(Self.snapshot(for:))
+        let followUpSnapshots = try followUps().map(Self.snapshot(for:))
 
         AppLog.data.debug("Snapshot created contacts=\(contactSnapshots.count, privacy: .public) opportunities=\(opportunitySnapshots.count, privacy: .public) followUps=\(followUpSnapshots.count, privacy: .public)")
 
@@ -73,6 +42,55 @@ final class CRMRepository {
             opportunities: opportunitySnapshots,
             followUps: followUpSnapshots
         )
+    }
+
+    func contactSnapshots(matching query: String, limit: Int) throws -> [CRMContactSnapshot] {
+        let key = query.searchKey
+        guard !key.isEmpty, limit > 0 else { return [] }
+
+        return try contacts()
+            .filter { contact in
+                contact.fullName.searchKey.contains(key) ||
+                    contact.company.searchKey.contains(key) ||
+                    contact.role.searchKey.contains(key) ||
+                    contact.email.searchKey.contains(key) ||
+                    contact.phone.searchKey.contains(key) ||
+                    contact.notes.searchKey.contains(key) ||
+                    contact.tags.contains { $0.searchKey.contains(key) }
+            }
+            .prefix(limit)
+            .map(Self.snapshot(for:))
+    }
+
+    func opportunitySnapshots(matching query: String, limit: Int) throws -> [CRMOpportunitySnapshot] {
+        let key = query.searchKey
+        guard !key.isEmpty, limit > 0 else { return [] }
+
+        return try opportunities()
+            .filter { opportunity in
+                opportunity.title.searchKey.contains(key) ||
+                    opportunity.company.searchKey.contains(key) ||
+                    opportunity.stage.rawValue.searchKey.contains(key) ||
+                    opportunity.budgetText.searchKey.contains(key) ||
+                    opportunity.tags.contains { $0.searchKey.contains(key) }
+            }
+            .prefix(limit)
+            .map(Self.snapshot(for:))
+    }
+
+    func followUpSnapshots(matching query: String, limit: Int) throws -> [CRMFollowUpSnapshot] {
+        let key = query.searchKey
+        guard !key.isEmpty, limit > 0 else { return [] }
+
+        return try followUps()
+            .filter { followUp in
+                followUp.title.searchKey.contains(key) ||
+                    followUp.dueDateText.searchKey.contains(key) ||
+                    followUp.notes.searchKey.contains(key) ||
+                    followUp.state.rawValue.searchKey.contains(key)
+            }
+            .prefix(limit)
+            .map(Self.snapshot(for:))
     }
 
     func contact(id string: String?) throws -> Contact? {
@@ -102,6 +120,9 @@ final class CRMRepository {
         return try contacts().filter {
             $0.fullName.searchKey.contains(key) ||
             $0.company.searchKey.contains(key) ||
+            $0.role.searchKey.contains(key) ||
+            $0.email.searchKey.contains(key) ||
+            $0.phone.searchKey.contains(key) ||
             $0.tags.contains { $0.searchKey.contains(key) }
         }
     }
@@ -167,6 +188,11 @@ final class CRMRepository {
     }
 
     func deleteContact(_ contact: Contact) throws {
+        stageDeleteContact(contact)
+        try save()
+    }
+
+    func stageDeleteContact(_ contact: Contact) {
         let contactID = contact.id
         let contactName = contact.fullName
 
@@ -180,10 +206,14 @@ final class CRMRepository {
 
         addActivity(title: "Contact deleted", detail: contactName, entityKind: .contact, entityID: contactID)
         context.delete(contact)
-        try save()
     }
 
     func deleteOpportunity(_ opportunity: Opportunity) throws {
+        stageDeleteOpportunity(opportunity)
+        try save()
+    }
+
+    func stageDeleteOpportunity(_ opportunity: Opportunity) {
         let opportunityID = opportunity.id
         let opportunityTitle = opportunity.title
 
@@ -191,14 +221,17 @@ final class CRMRepository {
 
         addActivity(title: "Opportunity deleted", detail: opportunityTitle, entityKind: .opportunity, entityID: opportunityID)
         context.delete(opportunity)
-        try save()
     }
 
     func deleteFollowUp(_ task: FollowUpTask) throws {
+        stageDeleteFollowUp(task)
+        try save()
+    }
+
+    func stageDeleteFollowUp(_ task: FollowUpTask) {
         AppLog.data.info("Deleting follow-up id=\(task.id.uuidString, privacy: .public) title=\(task.title, privacy: .private)")
         addActivity(title: "Follow-up deleted", detail: task.title, entityKind: .followUp, entityID: task.id)
         context.delete(task)
-        try save()
     }
 
     func deleteAllData() throws {
@@ -253,5 +286,44 @@ final class CRMRepository {
             AppLog.data.error("SwiftData save failed error=\(error.localizedDescription, privacy: .public)")
             throw error
         }
+    }
+
+    private static func snapshot(for contact: Contact) -> CRMContactSnapshot {
+        CRMContactSnapshot(
+            id: contact.id.uuidString,
+            fullName: contact.fullName,
+            company: contact.company,
+            role: contact.role,
+            email: contact.email,
+            phone: contact.phone,
+            notes: contact.notes,
+            tags: contact.tags
+        )
+    }
+
+    private static func snapshot(for opportunity: Opportunity) -> CRMOpportunitySnapshot {
+        CRMOpportunitySnapshot(
+            id: opportunity.id.uuidString,
+            title: opportunity.title,
+            company: opportunity.company,
+            contactID: opportunity.contact?.id.uuidString,
+            stage: opportunity.stage.rawValue,
+            estimatedValueEUR: opportunity.estimatedValueEUR,
+            budgetText: opportunity.budgetText,
+            expectedStart: opportunity.expectedStart,
+            tags: opportunity.tags
+        )
+    }
+
+    private static func snapshot(for followUp: FollowUpTask) -> CRMFollowUpSnapshot {
+        CRMFollowUpSnapshot(
+            id: followUp.id.uuidString,
+            title: followUp.title,
+            contactID: followUp.contact?.id.uuidString,
+            opportunityID: followUp.opportunity?.id.uuidString,
+            dueDateText: followUp.dueDateText,
+            notes: followUp.notes,
+            state: followUp.state.rawValue
+        )
     }
 }

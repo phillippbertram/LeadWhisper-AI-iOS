@@ -33,7 +33,7 @@ struct FindFollowUpsArguments: Sendable {
 }
 
 struct FindContactsTool: Tool {
-    let contacts: [CRMContactSnapshot]
+    let dataSource: AgentToolDataSource
 
     var name: String { "findContacts" }
     var description: String {
@@ -48,19 +48,14 @@ struct FindContactsTool: Tool {
             return ToolText.emptyQuery
         }
 
-        let matches = contacts.filter { contact in
-            return contact.fullName.searchKey.contains(key) ||
-                contact.company.searchKey.contains(key) ||
-                contact.notes.searchKey.contains(key) ||
-                contact.tags.contains { $0.searchKey.contains(key) }
-        }
-        AppLog.tools.debug("findContacts query=\(arguments.query, privacy: .private) matches=\(matches.count, privacy: .public) returned=\(min(matches.count, ToolText.resultLimit), privacy: .public)")
-        return ToolText.contacts(matches.prefix(ToolText.resultLimit))
+        let matches = try await dataSource.contacts(arguments.query, ToolText.resultLimit)
+        AppLog.tools.debug("findContacts query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
+        return ToolText.contacts(matches)
     }
 }
 
 struct FindOpportunitiesTool: Tool {
-    let opportunities: [CRMOpportunitySnapshot]
+    let dataSource: AgentToolDataSource
 
     var name: String { "findOpportunities" }
     var description: String {
@@ -75,20 +70,14 @@ struct FindOpportunitiesTool: Tool {
             return ToolText.emptyQuery
         }
 
-        let matches = opportunities.filter { opportunity in
-            return opportunity.title.searchKey.contains(key) ||
-                opportunity.company.searchKey.contains(key) ||
-                opportunity.stage.searchKey.contains(key) ||
-                opportunity.budgetText.searchKey.contains(key) ||
-                opportunity.tags.contains { $0.searchKey.contains(key) }
-        }
-        AppLog.tools.debug("findOpportunities query=\(arguments.query, privacy: .private) matches=\(matches.count, privacy: .public) returned=\(min(matches.count, ToolText.resultLimit), privacy: .public)")
-        return ToolText.opportunities(matches.prefix(ToolText.resultLimit))
+        let matches = try await dataSource.opportunities(arguments.query, ToolText.resultLimit)
+        AppLog.tools.debug("findOpportunities query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
+        return ToolText.opportunities(matches)
     }
 }
 
 struct FindFollowUpsTool: Tool {
-    let followUps: [CRMFollowUpSnapshot]
+    let dataSource: AgentToolDataSource
 
     var name: String { "findFollowUps" }
     var description: String {
@@ -103,14 +92,9 @@ struct FindFollowUpsTool: Tool {
             return ToolText.emptyQuery
         }
 
-        let matches = followUps.filter { followUp in
-            return followUp.title.searchKey.contains(key) ||
-                followUp.dueDateText.searchKey.contains(key) ||
-                followUp.notes.searchKey.contains(key) ||
-                followUp.state.searchKey.contains(key)
-        }
-        AppLog.tools.debug("findFollowUps query=\(arguments.query, privacy: .private) matches=\(matches.count, privacy: .public) returned=\(min(matches.count, ToolText.resultLimit), privacy: .public)")
-        return ToolText.followUps(matches.prefix(ToolText.resultLimit))
+        let matches = try await dataSource.followUps(arguments.query, ToolText.resultLimit)
+        AppLog.tools.debug("findFollowUps query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
+        return ToolText.followUps(matches)
     }
 }
 
@@ -119,15 +103,15 @@ enum ToolText {
     nonisolated static var emptyQuery: String { "No query supplied. Ask for a specific name, company, opportunity, or follow-up." }
     private nonisolated static var noMatches: String { "No matching local records." }
 
-    nonisolated static func contacts(_ contacts: ArraySlice<CRMContactSnapshot>) -> String {
+    nonisolated static func contacts(_ contacts: [CRMContactSnapshot]) -> String {
         guard !contacts.isEmpty else { return noMatches }
         return contacts.map {
-            "contact id=\($0.id) name=\($0.fullName.compactToolValue) company=\($0.company.compactToolValue) tags=\($0.tags.toolList)"
+            "contact id=\($0.id) name=\($0.fullName.compactToolValue) company=\($0.company.compactToolValue) role=\($0.role.compactToolValue) email=\($0.email.compactToolValue) phone=\($0.phone.compactToolValue) tags=\($0.tags.toolList)"
         }
         .joined(separator: "\n")
     }
 
-    nonisolated static func opportunities(_ opportunities: ArraySlice<CRMOpportunitySnapshot>) -> String {
+    nonisolated static func opportunities(_ opportunities: [CRMOpportunitySnapshot]) -> String {
         guard !opportunities.isEmpty else { return noMatches }
         return opportunities.map {
             let value = $0.estimatedValueEUR.map { String($0) } ?? $0.budgetText.compactToolValue
@@ -136,7 +120,7 @@ enum ToolText {
         .joined(separator: "\n")
     }
 
-    nonisolated static func followUps(_ followUps: ArraySlice<CRMFollowUpSnapshot>) -> String {
+    nonisolated static func followUps(_ followUps: [CRMFollowUpSnapshot]) -> String {
         guard !followUps.isEmpty else { return noMatches }
         return followUps.map {
             "followUp id=\($0.id) title=\($0.title.compactToolValue) due=\($0.dueDateText.compactToolValue) state=\($0.state) notes=\($0.notes.compactToolValue)"

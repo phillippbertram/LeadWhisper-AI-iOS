@@ -30,6 +30,11 @@ struct AgentLookupMode: OptionSet, Sendable, Equatable {
 @MainActor
 final class LeadAgentService {
     private let model = SystemLanguageModel.default
+    private let toolDataSource: AgentToolDataSource
+
+    init(repository _: CRMRepository, toolDataSource: AgentToolDataSource) {
+        self.toolDataSource = toolDataSource
+    }
 
     var availabilityMessage: String {
         Self.availabilityMessage(for: model.availability)
@@ -43,48 +48,28 @@ final class LeadAgentService {
         AppLog.agent.debug("SystemLanguageModel prewarm requested at UI appear")
     }
 
-    func draft(for transcript: String, repository: CRMRepository) async -> AgentRunResult {
+    func draft(for transcript: String) async -> AgentRunResult {
         AppLog.agent.info("Agent draft requested transcriptCharacters=\(transcript.count, privacy: .public)")
-
-        let snapshot: CRMDataSnapshot
-        do {
-            snapshot = try repository.snapshot()
-            AppLog.agent.debug("Agent snapshot loaded contacts=\(snapshot.contacts.count, privacy: .public) opportunities=\(snapshot.opportunities.count, privacy: .public) followUps=\(snapshot.followUps.count, privacy: .public)")
-        } catch {
-            AppLog.agent.error("Agent snapshot failed error=\(error.localizedDescription, privacy: .public)")
-            let draft = DemoAgentParser.makeDraft(transcript: transcript)
-            return AgentRunResult(
-                draft: draft,
-                timeline: [
-                    AgentTimelineItem(title: "Transcript received", detail: "Using demo parser because local data could not be read.", systemImage: "text.bubble"),
-                    AgentTimelineItem(title: "Repository error", detail: error.localizedDescription, systemImage: "exclamationmark.triangle")
-                ],
-                usedMockParser: true,
-                availabilityMessage: availabilityMessage,
-                errorMessage: error.localizedDescription
-            )
-        }
 
         let lookupMode = Self.lookupMode(for: transcript)
         AppLog.agent.info("Agent lookup mode=\(lookupMode.label, privacy: .public)")
 
         guard model.isAvailable else {
-            AppLog.agent.info("Foundation Models unavailable availability=\(self.availabilityMessage, privacy: .public); using demo parser")
-            let draft = DemoAgentParser.makeDraft(transcript: transcript, snapshot: snapshot)
+            AppLog.agent.info("Foundation Models unavailable availability=\(self.availabilityMessage, privacy: .public); no draft created")
             return AgentRunResult(
-                draft: draft,
+                draft: blockedDraft(summary: "Model unavailable"),
                 timeline: [
-                    AgentTimelineItem(title: "Transcript received", detail: "Foundation Models unavailable on this device.", systemImage: "text.bubble"),
-                    AgentTimelineItem(title: "Demo parser used", detail: availabilityMessage, systemImage: "switch.2")
+                    AgentTimelineItem(title: "Transcript received", detail: "No CRM changes were drafted.", systemImage: "text.bubble"),
+                    AgentTimelineItem(title: "Model unavailable", detail: availabilityMessage, systemImage: "exclamationmark.triangle")
                 ],
-                usedMockParser: true,
+                usedMockParser: false,
                 availabilityMessage: availabilityMessage,
-                errorMessage: nil
+                errorMessage: "LeadWhisper needs Apple Foundation Models to draft CRM changes. No local data was changed."
             )
         }
 
         do {
-            let selectedTools = tools(for: lookupMode, snapshot: snapshot)
+            let selectedTools = tools(for: lookupMode)
             AppLog.agent.debug("Creating LanguageModelSession tools=\(selectedTools.count, privacy: .public) mode=\(lookupMode.label, privacy: .public)")
             let session = LanguageModelSession(
                 model: model,
@@ -98,7 +83,7 @@ final class LeadAgentService {
                 to: prompt(for: transcript),
                 generating: AgentDraft.self,
                 includeSchemaInPrompt: false,
-                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 900)
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 1_200)
             )
 
             AppLog.agent.info("Foundation Models draft generated proposedChanges=\(response.content.proposedChanges.count, privacy: .public) facts=\(response.content.detectedFacts.count, privacy: .public) clarification=\(response.content.clarification == nil ? "none" : "present", privacy: .public)")
@@ -112,13 +97,14 @@ final class LeadAgentService {
         } catch {
             let exceededContext = Self.isContextWindowError(error)
             AppLog.agent.error("Foundation Models draft failed contextWindow=\(exceededContext, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            let draft = DemoAgentParser.makeDraft(transcript: transcript, snapshot: snapshot)
             return AgentRunResult(
-                draft: draft,
-                timeline: fallbackTimeline(for: error, exceededContext: exceededContext, lookupMode: lookupMode),
-                usedMockParser: true,
+                draft: blockedDraft(summary: "Could not draft changes"),
+                timeline: modelFailureTimeline(for: error, exceededContext: exceededContext, lookupMode: lookupMode),
+                usedMockParser: false,
                 availabilityMessage: availabilityMessage,
-                errorMessage: exceededContext ? nil : error.localizedDescription
+                errorMessage: exceededContext ?
+                    "That request is too large for the local model. Try splitting it into one CRM update at a time." :
+                    "The local model could not prepare CRM changes. No local data was changed."
             )
         }
     }
@@ -128,9 +114,25 @@ final class LeadAgentService {
 
         return """
         You are LeadWhisper, a local CRM planner. Return an AgentDraft only.
-        Propose changes; never say data was saved. Ask clarification when a name or record is ambiguous.
+        Propose changes; never say data was saved.
+        Never invent contacts, opportunities, follow-ups, IDs, companies, budgets, dates, phone numbers, emails, or notes.
+        If the user's intent is not a clear CRM action, set clarification and leave proposedChanges empty.
+        If any required information is missing or ambiguous, set clarification and leave proposedChanges empty.
+        If a lookup tool says "No matching local records", treat that as a blocker. Ask what to create first or ask for a different existing record. Do not propose update, delete, complete, or archive changes for missing records.
+        Required information:
+        - createContact needs contactName and company.
+        - updateContact needs exactly one existing contact or an explicit clarification.
+        - createOpportunity needs contactName or company, opportunityTitle, and stage when the user names a stage.
+        - updateOpportunity and updateOpportunityStage need exactly one existing opportunity.
+        - createFollowUp needs a contact or opportunity plus followUpTitle; include dueDateText when the user provides timing.
+        - updateFollowUp and completeFollowUp need exactly one existing follow-up.
+        - delete actions need exactly one existing local record and targetID.
+        Ask clarification when a name or record is ambiguous.
         Stages: lead, qualified, proposalNeeded, proposalSent, won, lost.
+        Follow-up states: open, done, archived.
+        Contact fields: full name, company, role, email, phone, notes, tags.
         Actions: \(actions).
+        For destructive delete actions, use an existing local UUID in targetID and ask clarification unless exactly one record is clear.
         Attached lookup tools: \(lookupMode.label). Use short queries from the transcript only.
         """
     }
@@ -143,16 +145,16 @@ final class LeadAgentService {
         """
     }
 
-    private func tools(for lookupMode: AgentLookupMode, snapshot: CRMDataSnapshot) -> [any Tool] {
+    private func tools(for lookupMode: AgentLookupMode) -> [any Tool] {
         var tools: [any Tool] = []
         if lookupMode.contains(.contacts) {
-            tools.append(FindContactsTool(contacts: snapshot.contacts))
+            tools.append(FindContactsTool(dataSource: toolDataSource))
         }
         if lookupMode.contains(.opportunities) {
-            tools.append(FindOpportunitiesTool(opportunities: snapshot.opportunities))
+            tools.append(FindOpportunitiesTool(dataSource: toolDataSource))
         }
         if lookupMode.contains(.followUps) {
-            tools.append(FindFollowUpsTool(followUps: snapshot.followUps))
+            tools.append(FindFollowUpsTool(dataSource: toolDataSource))
         }
         return tools
     }
@@ -189,16 +191,26 @@ final class LeadAgentService {
         return items
     }
 
-    private func fallbackTimeline(for error: Error, exceededContext: Bool, lookupMode: AgentLookupMode) -> [AgentTimelineItem] {
+    private func blockedDraft(summary: String) -> AgentDraft {
+        AgentDraft(
+            summary: summary,
+            detectedFacts: [],
+            proposedChanges: [],
+            clarification: nil,
+            spokenConfirmation: ""
+        )
+    }
+
+    private func modelFailureTimeline(for error: Error, exceededContext: Bool, lookupMode: AgentLookupMode) -> [AgentTimelineItem] {
         if exceededContext {
             return [
                 AgentTimelineItem(title: "Foundation Model attempted", detail: "Compact lookup mode: \(lookupMode.label).", systemImage: "brain"),
-                AgentTimelineItem(title: "Used compact fallback", detail: "Used compact fallback because the local model budget was exceeded.", systemImage: "switch.2")
+                AgentTimelineItem(title: "Could not draft changes", detail: "The request was too large for the local model.", systemImage: "exclamationmark.triangle")
             ]
         }
 
         return [
-            AgentTimelineItem(title: "Foundation Model attempted", detail: "Fell back to demo parser.", systemImage: "brain"),
+            AgentTimelineItem(title: "Foundation Model attempted", detail: "No CRM changes were drafted.", systemImage: "brain"),
             AgentTimelineItem(title: "Model error", detail: error.localizedDescription, systemImage: "exclamationmark.triangle")
         ]
     }
@@ -211,6 +223,41 @@ final class LeadAgentService {
         }
 
         var mode: AgentLookupMode = .none
+
+        if key.contains("delete") ||
+            key.contains("remove") ||
+            key.contains("lösche") ||
+            key.contains("losche") ||
+            key.contains("loesche")
+        {
+            if key.contains("contact") || key.contains("kontakt") {
+                mode.insert(.contacts)
+            } else if key.contains("opportunity") || key.contains("opportunitat") || key.contains("opportunität") {
+                mode.insert(.opportunities)
+            } else if key.contains("follow") || key.contains("task") || key.contains("aufgabe") {
+                mode.insert(.followUps)
+            } else {
+                mode.insert(.contacts)
+                mode.insert(.opportunities)
+                mode.insert(.followUps)
+            }
+        }
+
+        if key.contains("done") ||
+            key.contains("complete") ||
+            key.contains("erledigt")
+        {
+            mode.insert(.followUps)
+        }
+
+        if key.contains("email") ||
+            key.contains("phone") ||
+            key.contains("telefon") ||
+            key.contains("role") ||
+            key.contains("rolle")
+        {
+            mode.insert(.contacts)
+        }
 
         if key.contains("verschiebe") ||
             key.contains("reschedule") ||
@@ -230,6 +277,8 @@ final class LeadAgentService {
         }
 
         if key.contains("update") ||
+            key.contains("edit") ||
+            key.contains("bearbeite") ||
             key.contains("angebot positiv") ||
             key.contains("proposal sent") ||
             key.contains("angebot gesendet")
@@ -268,13 +317,13 @@ final class LeadAgentService {
         case .available:
             "Apple Foundation Models available"
         case .unavailable(.appleIntelligenceNotEnabled):
-            "Apple Intelligence is not enabled. Demo parser is available."
+            "Apple Intelligence is not enabled."
         case .unavailable(.deviceNotEligible):
-            "This device is not eligible for Apple Intelligence. Demo parser is available."
+            "This device is not eligible for Apple Intelligence."
         case .unavailable(.modelNotReady):
-            "The on-device model is not ready yet. Demo parser is available."
+            "The on-device model is not ready yet."
         @unknown default:
-            "Foundation Models availability is unknown. Demo parser is available."
+            "Foundation Models availability is unknown."
         }
     }
 }

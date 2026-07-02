@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		519E97A12FF6C51300185A4A /* FactoryKit in Frameworks */ = {isa = PBXBuildFile; productRef = 519E97A02FF6C51300185A4A /* FactoryKit */; };
 		7B4F00032FF7000000185A4A /* BeamBorder in Frameworks */ = {isa = PBXBuildFile; productRef = 7B4F00022FF7000000185A4A /* BeamBorder */; };
 /* End PBXBuildFile section */
 
@@ -43,6 +44,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				519E97A12FF6C51300185A4A /* FactoryKit in Frameworks */,
 				7B4F00032FF7000000185A4A /* BeamBorder in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -96,6 +98,7 @@
 			name = LeadWhisper;
 			packageProductDependencies = (
 				7B4F00022FF7000000185A4A /* BeamBorder */,
+				519E97A02FF6C51300185A4A /* FactoryKit */,
 			);
 			productName = LeadWhisper;
 			productReference = 519E95C82FF68DA000185A4A /* LeadWhisper.app */;
@@ -154,6 +157,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				7B4F00012FF7000000185A4A /* XCRemoteSwiftPackageReference "BeamBorder" */,
+				519E979F2FF6C51300185A4A /* XCRemoteSwiftPackageReference "Factory" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 519E95C92FF68DA000185A4A /* Products */;
@@ -508,6 +512,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		519E979F2FF6C51300185A4A /* XCRemoteSwiftPackageReference "Factory" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/hmlongco/Factory";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.2.1;
+			};
+		};
 		7B4F00012FF7000000185A4A /* XCRemoteSwiftPackageReference "BeamBorder" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/phillippbertram/BeamBorder.git";
@@ -519,6 +531,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		519E97A02FF6C51300185A4A /* FactoryKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 519E979F2FF6C51300185A4A /* XCRemoteSwiftPackageReference "Factory" */;
+			productName = FactoryKit;
+		};
 		7B4F00022FF7000000185A4A /* BeamBorder */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 7B4F00012FF7000000185A4A /* XCRemoteSwiftPackageReference "BeamBorder" */;

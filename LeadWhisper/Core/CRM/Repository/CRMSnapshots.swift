@@ -2,6 +2,9 @@ struct CRMContactSnapshot: Codable, Sendable, Identifiable {
     var id: String
     var fullName: String
     var company: String
+    var role: String
+    var email: String
+    var phone: String
     var notes: String
     var tags: [String]
 }

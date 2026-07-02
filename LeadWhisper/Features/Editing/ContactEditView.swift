@@ -1,9 +1,9 @@
+import FactoryKit
 import SwiftData
 import SwiftUI
 
 struct ContactEditView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.crmRepository) private var injectedRepository
+    @InjectedObject(\.crmRepository) private var crmRepository
     @Environment(\.dismiss) private var dismiss
     let contact: Contact
     @State private var draft: ContactEditDraft
@@ -64,10 +64,9 @@ struct ContactEditView: View {
         contact.tags = draft.tagsText.tagsFromCommaSeparatedText()
         contact.updatedAt = .now
 
-        let repository = injectedRepository.repository(fallback: modelContext)
-        repository.addActivity(title: "Contact updated", detail: contact.fullName, entityKind: .contact, entityID: contact.id)
+        crmRepository.addActivity(title: "Contact updated", detail: contact.fullName, entityKind: .contact, entityID: contact.id)
         do {
-            try repository.save()
+            try crmRepository.save()
             dismiss()
         } catch {
             saveError = PresentableError(error)

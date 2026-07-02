@@ -59,6 +59,9 @@ struct ProposedChange: Sendable, Identifiable {
 
     var contactName: String?
     var company: String?
+    var role: String?
+    var email: String?
+    var phone: String?
     var opportunityTitle: String?
 
     @Guide(description: "lead, qualified, proposalNeeded, proposalSent, won, lost.")
@@ -69,6 +72,8 @@ struct ProposedChange: Sendable, Identifiable {
     var expectedStart: String?
     var followUpTitle: String?
     var dueDateText: String?
+    @Guide(description: "open, done, archived.")
+    var followUpState: String?
     var notes: String?
     var tags: [String]
 }
@@ -78,11 +83,16 @@ enum ProposedChangeAction: String, CaseIterable, Sendable, Hashable {
     case createContact
     case updateContact
     case createOpportunity
+    case updateOpportunity
     case updateOpportunityStage
     case createInteraction
     case createFollowUp
     case updateFollowUp
+    case completeFollowUp
     case archiveFollowUps
+    case deleteContact
+    case deleteOpportunity
+    case deleteFollowUp
 }
 
 @Generable(description: "Clarification question.")
@@ -118,6 +128,8 @@ struct ChangeExecutionResult {
 enum AgentDraftError: LocalizedError {
     case clarificationRequired(String)
     case emptyDraft
+    case destructiveConfirmationRequired
+    case unsafeDestructiveChange(String)
 
     var errorDescription: String? {
         switch self {
@@ -125,6 +137,10 @@ enum AgentDraftError: LocalizedError {
             "Clarification required: \(question)"
         case .emptyDraft:
             "The agent did not propose any changes."
+        case .destructiveConfirmationRequired:
+            "Deleting local CRM data requires an extra confirmation."
+        case .unsafeDestructiveChange(let reason):
+            reason
         }
     }
 }
@@ -132,6 +148,10 @@ enum AgentDraftError: LocalizedError {
 extension AgentDraft {
     var canApply: Bool {
         clarification == nil && !proposedChanges.isEmpty
+    }
+
+    var containsDestructiveChange: Bool {
+        proposedChanges.contains { $0.action.isDestructive }
     }
 
     static var empty: AgentDraft {
@@ -152,6 +172,9 @@ extension ProposedChange {
         targetID: String? = nil,
         contactName: String? = nil,
         company: String? = nil,
+        role: String? = nil,
+        email: String? = nil,
+        phone: String? = nil,
         opportunityTitle: String? = nil,
         stage: String? = nil,
         estimatedValueEUR: Int? = nil,
@@ -159,6 +182,7 @@ extension ProposedChange {
         expectedStart: String? = nil,
         followUpTitle: String? = nil,
         dueDateText: String? = nil,
+        followUpState: String? = nil,
         notes: String? = nil,
         tags: [String] = []
     ) {
@@ -168,6 +192,9 @@ extension ProposedChange {
         self.targetID = targetID
         self.contactName = contactName
         self.company = company
+        self.role = role
+        self.email = email
+        self.phone = phone
         self.opportunityTitle = opportunityTitle
         self.stage = stage
         self.estimatedValueEUR = estimatedValueEUR
@@ -175,7 +202,19 @@ extension ProposedChange {
         self.expectedStart = expectedStart
         self.followUpTitle = followUpTitle
         self.dueDateText = dueDateText
+        self.followUpState = followUpState
         self.notes = notes
         self.tags = tags
+    }
+}
+
+extension ProposedChangeAction {
+    var isDestructive: Bool {
+        switch self {
+        case .deleteContact, .deleteOpportunity, .deleteFollowUp:
+            true
+        case .createContact, .updateContact, .createOpportunity, .updateOpportunity, .updateOpportunityStage, .createInteraction, .createFollowUp, .updateFollowUp, .completeFollowUp, .archiveFollowUps:
+            false
+        }
     }
 }

@@ -1,9 +1,9 @@
+import FactoryKit
 import SwiftData
 import SwiftUI
 
 struct ContactsView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.crmRepository) private var injectedRepository
+    @InjectedObject(\.crmRepository) private var crmRepository
     @Query(sort: [SortDescriptor(\Contact.fullName, comparator: .localizedStandard)])
     private var contacts: [Contact]
     @State private var searchText = ""
@@ -145,7 +145,7 @@ struct ContactsView: View {
 
     private func perform(_ action: (CRMRepository) throws -> Void) {
         do {
-            try action(injectedRepository.repository(fallback: modelContext))
+            try action(crmRepository)
         } catch {
             actionError = PresentableError(error)
         }

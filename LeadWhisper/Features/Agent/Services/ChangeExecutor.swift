@@ -9,7 +9,7 @@ struct ChangeExecutor {
         self.repository = repository
     }
 
-    func apply(_ draft: AgentDraft, transcript: String) throws -> ChangeExecutionResult {
+    func apply(_ draft: AgentDraft, transcript: String, allowDestructive: Bool = false) throws -> ChangeExecutionResult {
         if let clarification = draft.clarification {
             AppLog.executor.warning("ChangeExecutor blocked by clarification question=\(clarification.question, privacy: .private)")
             throw AgentDraftError.clarificationRequired(clarification.question)
@@ -18,6 +18,11 @@ struct ChangeExecutor {
         guard !draft.proposedChanges.isEmpty else {
             AppLog.executor.warning("ChangeExecutor rejected empty draft")
             throw AgentDraftError.emptyDraft
+        }
+
+        guard allowDestructive || !draft.containsDestructiveChange else {
+            AppLog.executor.warning("ChangeExecutor blocked destructive draft without confirmation")
+            throw AgentDraftError.destructiveConfirmationRequired
         }
 
         AppLog.executor.info("Applying draft changes=\(draft.proposedChanges.count, privacy: .public) transcriptCharacters=\(transcript.count, privacy: .public)")
@@ -47,6 +52,18 @@ struct ChangeExecutor {
                 touchedOpportunity = opportunity
                 changedTitles.append(change.title)
                 addActivity(title: change.title, detail: opportunity.title, entityKind: .opportunity, entityID: opportunity.id)
+
+            case .updateOpportunity:
+                let contact = try repository.contact(named: change.contactName, company: change.company)
+                if let opportunity = try findOpportunity(from: change, fallbackContact: contact ?? touchedContact) {
+                    update(opportunity, from: change)
+                    touchedContact = contact ?? touchedContact
+                    touchedOpportunity = opportunity
+                    changedTitles.append(change.title)
+                    addActivity(title: change.title, detail: opportunity.title, entityKind: .opportunity, entityID: opportunity.id)
+                } else {
+                    AppLog.executor.warning("Skipped opportunity update because no opportunity matched title=\(change.opportunityTitle ?? "-", privacy: .private) company=\(change.company ?? "-", privacy: .private)")
+                }
 
             case .updateOpportunityStage:
                 if let opportunity = try findOpportunity(from: change, fallbackContact: touchedContact) {
@@ -80,13 +97,10 @@ struct ChangeExecutor {
                 addActivity(title: change.title, detail: task.title, entityKind: .followUp, entityID: task.id)
 
             case .updateFollowUp:
-                let contact = try repository.contact(id: change.targetID) ?? repository.contact(named: change.contactName, company: change.company)
+                let contact = try repository.contact(named: change.contactName, company: change.company)
                 let opportunity = try findOpportunity(from: change, fallbackContact: contact) ?? touchedOpportunity
-                if let task = try repository.followUp(id: change.targetID) ??
-                    repository.openFollowUp(contactID: contact?.id, opportunityID: opportunity?.id, query: change.followUpTitle ?? change.contactName ?? change.company ?? "") {
-                    task.dueDate = DueDateResolver.date(from: change.dueDateText) ?? task.dueDate
-                    task.dueDateText = change.dueDateText ?? task.dueDateText
-                    appendNote(change.notes, to: &task.notes)
+                if let task = try findUniqueFollowUp(from: change, fallbackContact: contact, fallbackOpportunity: opportunity) {
+                    update(task, from: change)
                     task.updatedAt = .now
                     touchedContact = contact ?? touchedContact
                     touchedOpportunity = opportunity
@@ -94,6 +108,18 @@ struct ChangeExecutor {
                     addActivity(title: change.title, detail: task.title, entityKind: .followUp, entityID: task.id)
                 } else {
                     AppLog.executor.warning("Skipped follow-up update because no open task matched title=\(change.followUpTitle ?? "-", privacy: .private) contact=\(change.contactName ?? "-", privacy: .private)")
+                }
+
+            case .completeFollowUp:
+                if let task = try findUniqueFollowUp(from: change, fallbackContact: touchedContact, fallbackOpportunity: touchedOpportunity) {
+                    task.state = .done
+                    task.updatedAt = .now
+                    touchedContact = task.contact ?? touchedContact
+                    touchedOpportunity = task.opportunity ?? touchedOpportunity
+                    changedTitles.append(change.title)
+                    addActivity(title: change.title, detail: task.title, entityKind: .followUp, entityID: task.id)
+                } else {
+                    AppLog.executor.warning("Skipped follow-up completion because no task matched title=\(change.followUpTitle ?? "-", privacy: .private) contact=\(change.contactName ?? "-", privacy: .private)")
                 }
 
             case .archiveFollowUps:
@@ -113,6 +139,21 @@ struct ChangeExecutor {
             case .createInteraction:
                 changedTitles.append(change.title)
                 AppLog.executor.debug("Interaction will be created after proposed changes")
+
+            case .deleteContact:
+                let contact = try findRequiredContactForDelete(from: change)
+                repository.stageDeleteContact(contact)
+                changedTitles.append(change.title)
+
+            case .deleteOpportunity:
+                let opportunity = try findRequiredOpportunityForDelete(from: change, fallbackContact: touchedContact)
+                repository.stageDeleteOpportunity(opportunity)
+                changedTitles.append(change.title)
+
+            case .deleteFollowUp:
+                let task = try findRequiredFollowUpForDelete(from: change, fallbackContact: touchedContact, fallbackOpportunity: touchedOpportunity)
+                repository.stageDeleteFollowUp(task)
+                changedTitles.append(change.title)
             }
         }
 
@@ -164,6 +205,15 @@ struct ChangeExecutor {
         if let company = change.company?.nilIfBlank {
             contact.company = company
         }
+        if let role = change.role?.nilIfBlank {
+            contact.role = role
+        }
+        if let email = change.email?.nilIfBlank {
+            contact.email = email
+        }
+        if let phone = change.phone?.nilIfBlank {
+            contact.phone = phone
+        }
         appendNote(change.notes, to: &contact.notes)
         contact.tags = contact.tags.mergingTags(change.tags)
         contact.updatedAt = .now
@@ -197,6 +247,37 @@ struct ChangeExecutor {
         )
     }
 
+    private func findRequiredOpportunityForDelete(from change: ProposedChange, fallbackContact: Contact?) throws -> Opportunity {
+        if let opportunity = try repository.opportunity(id: change.targetID) {
+            return opportunity
+        }
+
+        let contact = try repository.contact(named: change.contactName, company: change.company) ?? fallbackContact
+        let matches = try matchingOpportunities(from: change, fallbackContact: contact)
+        guard matches.count == 1, let opportunity = matches.first else {
+            throw AgentDraftError.unsafeDestructiveChange("I could not safely find exactly one opportunity to delete.")
+        }
+        return opportunity
+    }
+
+    private func matchingOpportunities(from change: ProposedChange, fallbackContact: Contact?) throws -> [Opportunity] {
+        let titleKey = change.opportunityTitle?.searchKey ?? ""
+        let companyKey = (change.company ?? fallbackContact?.company)?.searchKey ?? ""
+        guard !titleKey.isEmpty || !companyKey.isEmpty || fallbackContact != nil else { return [] }
+
+        return try repository.opportunities().filter { opportunity in
+            let titleMatches = titleKey.isEmpty ||
+                opportunity.title.searchKey == titleKey ||
+                opportunity.title.searchKey.contains(titleKey) ||
+                titleKey.contains(opportunity.title.searchKey)
+            let companyMatches = companyKey.isEmpty ||
+                opportunity.company.searchKey == companyKey ||
+                opportunity.company.searchKey.contains(companyKey)
+            let contactMatches = fallbackContact == nil || opportunity.contact?.id == fallbackContact?.id
+            return titleMatches && companyMatches && contactMatches
+        }
+    }
+
     private func update(_ opportunity: Opportunity, from change: ProposedChange) {
         if let title = change.opportunityTitle?.nilIfBlank {
             opportunity.title = title
@@ -219,6 +300,97 @@ struct ChangeExecutor {
         appendNote(change.notes, to: &opportunity.notes)
         opportunity.tags = opportunity.tags.mergingTags(change.tags)
         opportunity.updatedAt = .now
+    }
+
+    private func update(_ task: FollowUpTask, from change: ProposedChange) {
+        if let title = change.followUpTitle?.nilIfBlank {
+            task.title = title
+        }
+        if let dueDateText = change.dueDateText?.nilIfBlank {
+            task.dueDate = DueDateResolver.date(from: dueDateText) ?? task.dueDate
+            task.dueDateText = dueDateText
+        }
+        if let state = followUpState(from: change.followUpState) {
+            task.state = state
+        }
+        appendNote(change.notes, to: &task.notes)
+        task.updatedAt = .now
+    }
+
+    private func findRequiredContactForDelete(from change: ProposedChange) throws -> Contact {
+        if let contact = try repository.contact(id: change.targetID) {
+            return contact
+        }
+
+        let query = change.contactName?.nilIfBlank ?? change.company?.nilIfBlank ?? ""
+        guard !query.isEmpty else {
+            throw AgentDraftError.unsafeDestructiveChange("I need a contact name or company before deleting a contact.")
+        }
+
+        let companyKey = change.company?.searchKey ?? ""
+        let matches = try repository.contacts(matching: query).filter {
+            companyKey.isEmpty || $0.company.searchKey == companyKey || $0.company.searchKey.contains(companyKey)
+        }
+        guard matches.count == 1, let contact = matches.first else {
+            throw AgentDraftError.unsafeDestructiveChange("I could not safely find exactly one contact to delete.")
+        }
+        return contact
+    }
+
+    private func findRequiredFollowUpForDelete(from change: ProposedChange, fallbackContact: Contact?, fallbackOpportunity: Opportunity?) throws -> FollowUpTask {
+        guard let task = try findUniqueFollowUp(from: change, fallbackContact: fallbackContact, fallbackOpportunity: fallbackOpportunity) else {
+            throw AgentDraftError.unsafeDestructiveChange("I could not safely find exactly one follow-up to delete.")
+        }
+        return task
+    }
+
+    private func findUniqueFollowUp(from change: ProposedChange, fallbackContact: Contact?, fallbackOpportunity: Opportunity?) throws -> FollowUpTask? {
+        if let task = try repository.followUp(id: change.targetID) {
+            return task
+        }
+
+        let matches = try matchingFollowUps(from: change, fallbackContact: fallbackContact, fallbackOpportunity: fallbackOpportunity)
+        guard matches.count <= 1 else {
+            throw AgentDraftError.unsafeDestructiveChange("I found more than one matching follow-up. Please clarify which one to change.")
+        }
+        return matches.first
+    }
+
+    private func matchingFollowUps(from change: ProposedChange, fallbackContact: Contact?, fallbackOpportunity: Opportunity?) throws -> [FollowUpTask] {
+        let contact = try repository.contact(named: change.contactName, company: change.company) ?? fallbackContact
+        let opportunity = try findOpportunity(from: change, fallbackContact: contact) ?? fallbackOpportunity
+        let queryKey = (change.followUpTitle ?? change.contactName ?? change.company ?? change.dueDateText ?? "").searchKey
+
+        guard !queryKey.isEmpty || contact != nil || opportunity != nil else { return [] }
+
+        return try repository.followUps().filter { task in
+            let contactMatches = contact == nil || task.contact?.id == contact?.id
+            let opportunityMatches = opportunity == nil || task.opportunity?.id == opportunity?.id
+            let queryMatches = queryKey.isEmpty ||
+                task.title.searchKey.contains(queryKey) ||
+                task.notes.searchKey.contains(queryKey) ||
+                task.dueDateText.searchKey.contains(queryKey)
+            return contactMatches && opportunityMatches && queryMatches
+        }
+    }
+
+    private func followUpState(from value: String?) -> FollowUpState? {
+        guard let value = value?.nilIfBlank else { return nil }
+        if let state = FollowUpState(rawValue: value) {
+            return state
+        }
+
+        let key = value.searchKey
+        if key.contains("done") || key.contains("complete") || key.contains("erledigt") {
+            return .done
+        }
+        if key.contains("archive") || key.contains("archiv") {
+            return .archived
+        }
+        if key.contains("open") || key.contains("offen") {
+            return .open
+        }
+        return nil
     }
 
     private func appendNote(_ note: String?, to notes: inout String) {

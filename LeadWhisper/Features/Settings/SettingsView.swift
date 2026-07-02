@@ -1,9 +1,10 @@
+import FactoryKit
 import SwiftData
 import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
-    @Environment(\.crmRepository) private var injectedRepository
+    @InjectedObject(\.crmRepository) private var crmRepository
     @Query private var contacts: [Contact]
     @Query private var opportunities: [Opportunity]
     @Query private var followUps: [FollowUpTask]
@@ -81,7 +82,7 @@ struct SettingsView: View {
 
     private func deleteAllData() {
         do {
-            try injectedRepository.repository(fallback: modelContext).deleteAllData()
+            try crmRepository.deleteAllData()
             statusMessage = "All data deleted."
         } catch {
             actionError = PresentableError(error)

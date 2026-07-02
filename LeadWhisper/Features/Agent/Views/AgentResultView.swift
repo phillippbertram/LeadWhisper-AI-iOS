@@ -2,28 +2,47 @@ import SwiftUI
 
 struct AgentResultView: View {
     let runResult: AgentRunResult
+    var showsActions = true
     let save: () -> Void
     let cancel: () -> Void
     let answerClarification: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if runResult.usedMockParser {
-                Label("Demo parser fallback", systemImage: "switch.2")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 14) {
+            if let errorMessage = runResult.errorMessage?.nilIfBlank {
+                AgentNoticeView(
+                    title: runResult.draft.summary.nilIfBlank ?? "Could not draft changes",
+                    detail: errorMessage,
+                    systemImage: "exclamationmark.triangle",
+                    tint: .orange
+                )
             }
 
-            AgentTimelineView(items: runResult.timeline)
-            DetectedFactsView(facts: runResult.draft.detectedFacts)
+            if !runResult.timeline.isEmpty {
+                AgentTimelineView(items: runResult.timeline)
+            }
+
+            if !runResult.draft.detectedFacts.isEmpty {
+                DetectedFactsView(facts: runResult.draft.detectedFacts)
+            }
 
             if let clarification = runResult.draft.clarification {
-                ClarificationView(clarification: clarification, select: answerClarification)
-                cancelDraftButton
-            } else {
+                ClarificationView(clarification: clarification, isEnabled: showsActions, select: answerClarification)
+                if showsActions {
+                    cancelDraftButton
+                }
+            } else if !runResult.draft.proposedChanges.isEmpty {
                 ProposedChangesView(changes: runResult.draft.proposedChanges)
-                reviewActionButtons
+                if showsActions && runResult.draft.canApply {
+                    reviewActionButtons
+                }
+            } else if runResult.errorMessage == nil {
+                AgentNoticeView(
+                    title: "I need a little more context",
+                    detail: "Tell me which contact, opportunity, or follow-up you want to change and what should happen next.",
+                    systemImage: "questionmark.circle",
+                    tint: .blue
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -79,9 +98,9 @@ private struct AgentTimelineView: View {
     let items: [AgentTimelineItem]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Agent Plan")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What I checked")
+                .font(.subheadline.weight(.semibold))
             ForEach(items) { item in
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: item.systemImage)
@@ -89,17 +108,17 @@ private struct AgentTimelineView: View {
                         .frame(width: 22)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.title)
-                            .font(.subheadline.weight(.semibold))
+                            .font(.footnote.weight(.semibold))
                         Text(item.detail)
-                            .font(.footnote)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
         }
-        .padding(14)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -138,61 +157,125 @@ private struct ProposedChangesView: View {
             Text("Proposed Changes")
                 .font(.headline)
             ForEach(changes) { change in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Label(change.title, systemImage: change.action.systemImage)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 8)
-                        Text(change.action.rawValue)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let contactName = change.contactName?.nilIfBlank {
-                            ChangeDetailRow(title: "Contact", value: contactName)
-                        }
-                        if let company = change.company?.nilIfBlank {
-                            ChangeDetailRow(title: "Company", value: company)
-                        }
-                        if let opportunityTitle = change.opportunityTitle?.nilIfBlank {
-                            ChangeDetailRow(title: "Opportunity", value: opportunityTitle)
-                        }
-                        if let stage = change.stage.flatMap(OpportunityStage.from) {
-                            ChangeDetailRow(title: "Stage", value: stage.title)
-                        }
-                        if let value = change.estimatedValueEUR {
-                            ChangeDetailRow(title: "Value", value: value.formatted(.currency(code: "EUR").precision(.fractionLength(0))))
-                        } else if let budget = change.budgetText?.nilIfBlank {
-                            ChangeDetailRow(title: "Budget", value: budget)
-                        }
-                        if let dueDate = change.dueDateText?.nilIfBlank {
-                            ChangeDetailRow(title: "Due", value: dueDate)
-                        }
-                        if let notes = change.notes?.nilIfBlank {
-                            Text(notes)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(3)
-                        }
-                        TagStrip(tags: change.tags)
-                    }
-                    .font(.footnote)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.background, in: RoundedRectangle(cornerRadius: 8))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(.quaternary)
-                }
+                ProposedChangeCard(change: change)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AgentNoticeView: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.headline)
+                .foregroundStyle(tint)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(tint.opacity(0.18))
+        }
+    }
+}
+
+private struct ProposedChangeCard: View {
+    let change: ProposedChange
+
+    private var isDestructive: Bool {
+        change.action.isDestructive
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Label(change.title, systemImage: change.action.systemImage)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(isDestructive ? .red : .primary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Text(change.action.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(isDestructive ? .red : .secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+
+            ProposedChangeDetails(change: change)
+                .font(.footnote)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isDestructive ? Color.red.opacity(0.08) : Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isDestructive ? Color.red.opacity(0.28) : Color.secondary.opacity(0.18))
+        }
+    }
+}
+
+private struct ProposedChangeDetails: View {
+    let change: ProposedChange
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let contactName = change.contactName?.nilIfBlank {
+                ChangeDetailRow(title: "Contact", value: contactName)
+            }
+            if let company = change.company?.nilIfBlank {
+                ChangeDetailRow(title: "Company", value: company)
+            }
+            if let role = change.role?.nilIfBlank {
+                ChangeDetailRow(title: "Role", value: role)
+            }
+            if let email = change.email?.nilIfBlank {
+                ChangeDetailRow(title: "Email", value: email)
+            }
+            if let phone = change.phone?.nilIfBlank {
+                ChangeDetailRow(title: "Phone", value: phone)
+            }
+            if let opportunityTitle = change.opportunityTitle?.nilIfBlank {
+                ChangeDetailRow(title: "Opportunity", value: opportunityTitle)
+            }
+            if let stage = change.stage.flatMap(OpportunityStage.from) {
+                ChangeDetailRow(title: "Stage", value: stage.title)
+            }
+            if let value = change.estimatedValueEUR {
+                ChangeDetailRow(title: "Value", value: value.formatted(.currency(code: "EUR").precision(.fractionLength(0))))
+            } else if let budget = change.budgetText?.nilIfBlank {
+                ChangeDetailRow(title: "Budget", value: budget)
+            }
+            if let dueDate = change.dueDateText?.nilIfBlank {
+                ChangeDetailRow(title: "Due", value: dueDate)
+            }
+            if let state = change.followUpState?.nilIfBlank {
+                ChangeDetailRow(title: "State", value: FollowUpState(rawValue: state)?.title ?? state)
+            }
+            if let notes = change.notes?.nilIfBlank {
+                Text(notes)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            TagStrip(tags: change.tags)
+        }
     }
 }
 
@@ -243,10 +326,12 @@ private extension ProposedChangeAction {
         switch self {
         case .createContact, .updateContact:
             "person.crop.circle.badge.plus"
-        case .createOpportunity, .updateOpportunityStage:
+        case .createOpportunity, .updateOpportunity, .updateOpportunityStage:
             "chart.line.uptrend.xyaxis"
-        case .createFollowUp, .updateFollowUp, .archiveFollowUps:
+        case .createFollowUp, .updateFollowUp, .completeFollowUp, .archiveFollowUps:
             "bell"
+        case .deleteContact, .deleteOpportunity, .deleteFollowUp:
+            "trash"
         case .createInteraction:
             "text.bubble"
         }
@@ -255,47 +340,79 @@ private extension ProposedChangeAction {
 
 private struct ClarificationView: View {
     let clarification: ClarificationPrompt
+    let isEnabled: Bool
     let select: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Clarification Needed", systemImage: "questionmark.circle")
-                .font(.headline)
-            Text(clarification.question)
-                .font(.body)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "questionmark.bubble")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("I need one detail before I can draft this.")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(clarification.question)
+                        .font(.body.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             ForEach(clarification.options, id: \.self) { option in
                 Button {
                     select(option)
                 } label: {
                     HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: "person.crop.circle.badge.checkmark")
-                            .font(.title3)
-                            .frame(width: 24)
-                        Text(option)
-                            .font(.headline)
-                            .lineLimit(nil)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Image(systemName: iconName(for: option))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.blue)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(option)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(nil)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("Use this answer")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Spacer()
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: "arrow.up.message")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .padding(.top, 2)
                     }
                     .padding(14)
                     .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-                    .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(.blue.opacity(0.22))
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(.blue.opacity(0.16))
                     }
                 }
                 .buttonStyle(.plain)
+                .disabled(!isEnabled)
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func iconName(for option: String) -> String {
+        let key = option.searchKey
+        if key.contains("yes") || key.contains("no") || key.contains("unclear") {
+            return "checkmark.circle"
+        }
+        if key.contains("follow") || key.contains("task") {
+            return "bell"
+        }
+        if key.contains("opportunity") || key.contains("proposal") {
+            return "chart.line.uptrend.xyaxis"
+        }
+        return "person.crop.circle"
     }
 }
