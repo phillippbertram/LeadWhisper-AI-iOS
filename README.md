@@ -22,15 +22,21 @@ So the showcase moved up a layer. The interesting question is no longer "can Fou
 
 ## Screenshots
 
+<p align="center">
+  <img src="Screenshots/leadwhisper-agentview.gif" alt="LeadWhisper AgentView interaction" width="240">
+  <br>
+  <sub>AgentView interaction</sub>
+</p>
+
 <table>
   <tr>
-    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-agent.jpg" alt="LeadWhisper Agent screen" width="180"><br><sub>Agent</sub></td>
-    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-today.jpg" alt="LeadWhisper Today screen" width="180"><br><sub>Today</sub></td>
-    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-contacts.jpg" alt="LeadWhisper Contacts screen" width="180"><br><sub>Contacts</sub></td>
+    <td align="center"><img src="Screenshots/leadwhisper-agent.jpg" alt="LeadWhisper Agent screen" width="180"><br><sub>Agent</sub></td>
+    <td align="center"><img src="Screenshots/leadwhisper-today.jpg" alt="LeadWhisper Today screen" width="180"><br><sub>Today</sub></td>
+    <td align="center"><img src="Screenshots/leadwhisper-contacts.jpg" alt="LeadWhisper Contacts screen" width="180"><br><sub>Contacts</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-opportunities.jpg" alt="LeadWhisper Opportunities screen" width="180"><br><sub>Opportunities</sub></td>
-    <td align="center"><img src="Screenshots/app-2026-07-02/leadwhisper-settings.jpg" alt="LeadWhisper Settings screen" width="180"><br><sub>Settings</sub></td>
+    <td align="center"><img src="Screenshots/leadwhisper-opportunities.jpg" alt="LeadWhisper Opportunities screen" width="180"><br><sub>Opportunities</sub></td>
+    <td align="center"><img src="Screenshots/leadwhisper-settings.jpg" alt="LeadWhisper Settings screen" width="180"><br><sub>Settings</sub></td>
     <td></td>
   </tr>
 </table>
