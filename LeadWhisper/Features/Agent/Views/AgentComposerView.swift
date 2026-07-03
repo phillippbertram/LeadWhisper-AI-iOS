@@ -19,7 +19,6 @@ struct AgentComposerView: View {
     @FocusState private var isInputFocused: Bool
     @State private var voiceInput = VoiceInputService()
     @State private var engine = Container.shared.agentConversationEngine()
-    @State private var speechOutput = SpeechOutputService()
     @State private var draftText = ""
     @State private var activeTranscript = ""
     @State private var isVoiceSession = false
@@ -32,9 +31,12 @@ struct AgentComposerView: View {
     @State private var showsPrivacyInfo = false
     @State private var actionError: PresentableError?
     @State private var hasShownEntryAnimation = false
+    @State private var hasAppliedInitialPrompt = false
+    private let initialPrompt: String?
     private let openChangedRecord: ((ChangedCRMRecord) -> Void)?
 
-    init(openChangedRecord: ((ChangedCRMRecord) -> Void)? = nil) {
+    init(initialPrompt: String? = nil, openChangedRecord: ((ChangedCRMRecord) -> Void)? = nil) {
+        self.initialPrompt = initialPrompt
         self.openChangedRecord = openChangedRecord
     }
 
@@ -53,6 +55,7 @@ struct AgentComposerView: View {
                             message: message,
                             activeResultID: activeResultID,
                             openChangedRecord: openChangedRecord,
+                            startPrompt: submit,
                             save: saveDraft,
                             cancel: cancelDraft
                         )
@@ -124,6 +127,7 @@ struct AgentComposerView: View {
                 .animation(.snappy(duration: 0.18), value: activeResultID)
             }
             .onAppear {
+                applyInitialPromptIfNeeded()
                 refreshSuggestions()
                 engine.refreshContextWindowUsage(for: draftText)
                 scrollToBottom(proxy)
@@ -349,6 +353,18 @@ struct AgentComposerView: View {
         }
     }
 
+    private func applyInitialPromptIfNeeded() {
+        guard !hasAppliedInitialPrompt,
+              messages.isEmpty,
+              draftText.nilIfBlank == nil,
+              let initialPrompt = initialPrompt?.nilIfBlank else {
+            return
+        }
+
+        draftText = initialPrompt
+        hasAppliedInitialPrompt = true
+    }
+
     private func submitDraftText() {
         submit(draftText)
     }
@@ -405,7 +421,11 @@ struct AgentComposerView: View {
         if result.kind == .reply, result.errorMessage == nil {
             let text = result.message.nilIfBlank ?? "Tell me which contact, opportunity, or follow-up you want to change and what should happen next."
             activeResultID = replacingResultID
-            messages.append(.assistant(text, detail: nil, systemImage: "sparkles"))
+            if result.followUpOverviewItems.isEmpty {
+                messages.append(.assistant(text, detail: nil, systemImage: "sparkles"))
+            } else {
+                messages.append(.followUpOverview(title: text, items: result.followUpOverviewItems))
+            }
         } else {
             activeResultID = result.id
             if let replacingResultID,
@@ -417,11 +437,11 @@ struct AgentComposerView: View {
         AppLog.agent.info("Agent analyze finished kind=\(result.kind.rawValue, privacy: .public) proposedChanges=\(result.draft.proposedChanges.count, privacy: .public) hasError=\(result.errorMessage == nil ? "false" : "true", privacy: .public)")
     }
 
-    private func saveDraft(_ runResult: AgentRunResult, transcript: String, selectedChangeIDs: Set<String>) {
+    private func saveDraft(_ runResult: AgentRunResult, transcript: String, proposedChanges: [ProposedChange], selectedChangeIDs: Set<String>) {
         guard runResult.id == activeResultID else { return }
 
         var draft = runResult.draft
-        draft.proposedChanges = draft.proposedChanges.filter { selectedChangeIDs.contains($0.id) }
+        draft.proposedChanges = proposedChanges.filter { selectedChangeIDs.contains($0.id) }
         guard !draft.proposedChanges.isEmpty else { return }
 
         if draft.containsDestructiveChange {
@@ -443,7 +463,6 @@ struct AgentComposerView: View {
             activeTranscript = ""
             engine.noteDraftSaved()
             messages.append(.receipt(result.changedRecords))
-            speechOutput.speak(result.spokenSummary)
             AppLog.agent.info("Agent draft saved changedRecords=\(result.changedRecords.count, privacy: .public)")
         } catch {
             actionError = PresentableError(error)
@@ -565,6 +584,10 @@ private struct AgentConversationMessage: Identifiable {
         AgentConversationMessage(content: .assistant(title: title, detail: detail, systemImage: systemImage))
     }
 
+    static func followUpOverview(title: String, items: [AgentFollowUpOverviewItem]) -> AgentConversationMessage {
+        AgentConversationMessage(content: .followUpOverview(title: title, items: items))
+    }
+
     static func result(_ runResult: AgentRunResult, transcript: String) -> AgentConversationMessage {
         AgentConversationMessage(content: .result(runResult, transcript: transcript))
     }
@@ -583,6 +606,7 @@ private struct AgentConversationMessage: Identifiable {
 
 private enum AgentMessageContent {
     case assistant(title: String, detail: String?, systemImage: String)
+    case followUpOverview(title: String, items: [AgentFollowUpOverviewItem])
     case user(String)
     case result(AgentRunResult, transcript: String)
     case receipt([ChangedCRMRecord])
@@ -592,13 +616,17 @@ private struct AgentMessageRow: View {
     let message: AgentConversationMessage
     let activeResultID: UUID?
     let openChangedRecord: ((ChangedCRMRecord) -> Void)?
-    let save: (AgentRunResult, String, Set<String>) -> Void
+    let startPrompt: (String) -> Void
+    let save: (AgentRunResult, String, [ProposedChange], Set<String>) -> Void
     let cancel: (AgentRunResult) -> Void
 
     var body: some View {
         switch message.content {
         case .assistant(let title, let detail, let systemImage):
             AssistantBubble(title: title, detail: detail, systemImage: systemImage)
+
+        case .followUpOverview(let title, let items):
+            FollowUpOverviewBubble(title: title, items: items, open: openChangedRecord)
 
         case .user(let text):
             UserBubble(text: text)
@@ -613,7 +641,7 @@ private struct AgentMessageRow: View {
             )
 
         case .receipt(let changedRecords):
-            ReceiptBubble(changedRecords: changedRecords, open: openChangedRecord)
+            ReceiptBubble(changedRecords: changedRecords, open: openChangedRecord, startPrompt: startPrompt)
         }
     }
 }
@@ -644,27 +672,146 @@ private struct AssistantBubble: View {
     }
 }
 
+private struct FollowUpOverviewBubble: View {
+    let title: String
+    let items: [AgentFollowUpOverviewItem]
+    let open: ((ChangedCRMRecord) -> Void)?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            AgentAvatar(systemImage: "calendar.badge.clock")
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(items) { item in
+                        FollowUpOverviewRow(item: item, open: open)
+                    }
+                }
+            }
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            Spacer(minLength: 36)
+        }
+    }
+}
+
+private struct FollowUpOverviewRow: View {
+    let item: AgentFollowUpOverviewItem
+    let open: ((ChangedCRMRecord) -> Void)?
+
+    var body: some View {
+        if let open {
+            Button {
+                open(item.changedRecord)
+            } label: {
+                rowContent(showsChevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open Follow-up, \(item.title), due \(item.dueDateText)")
+        } else {
+            rowContent(showsChevron: false)
+        }
+    }
+
+    private var relatedText: String? {
+        let values = [item.contactTitle, item.opportunityTitle]
+            .compactMap { $0?.nilIfBlank }
+        return values.isEmpty ? nil : values.joined(separator: " / ")
+    }
+
+    private func rowContent(showsChevron: Bool) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "bell.badge")
+                .font(.headline)
+                .foregroundStyle(.orange)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(item.title)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Label(item.dueDateText, systemImage: "calendar")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+
+                if let relatedText {
+                    Label(relatedText, systemImage: "person.text.rectangle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.secondary.opacity(0.14))
+        }
+    }
+}
+
 private struct UserBubble: View {
     let text: String
+    @State private var isExpanded = false
+
+    private var shouldCollapse: Bool {
+        text.count > 260 || text.filter { $0 == "\n" }.count >= 5
+    }
 
     var body: some View {
         HStack {
             Spacer(minLength: 46)
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(.white)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background(
-                    LinearGradient(
-                        colors: [.blue, .cyan],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
-                .shadow(color: .blue.opacity(0.12), radius: 10, x: 0, y: 5)
+            VStack(alignment: .trailing, spacing: 7) {
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+                    .lineLimit(shouldCollapse && !isExpanded ? 6 : nil)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if shouldCollapse {
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        Label(isExpanded ? "Hide" : "Show full note", systemImage: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.86))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(
+                LinearGradient(
+                    colors: [.blue, .cyan],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .shadow(color: .blue.opacity(0.12), radius: 10, x: 0, y: 5)
         }
     }
 }
@@ -673,7 +820,7 @@ private struct AgentResultBubble: View {
     let runResult: AgentRunResult
     let transcript: String
     let isActive: Bool
-    let save: (AgentRunResult, String, Set<String>) -> Void
+    let save: (AgentRunResult, String, [ProposedChange], Set<String>) -> Void
     let cancel: (AgentRunResult) -> Void
 
     var body: some View {
@@ -682,7 +829,7 @@ private struct AgentResultBubble: View {
             AgentResultView(
                 runResult: runResult,
                 showsActions: isActive,
-                save: { selectedChangeIDs in save(runResult, transcript, selectedChangeIDs) },
+                save: { proposedChanges, selectedChangeIDs in save(runResult, transcript, proposedChanges, selectedChangeIDs) },
                 cancel: { cancel(runResult) }
             )
             .padding(12)
@@ -701,6 +848,7 @@ private struct AgentResultBubble: View {
 private struct ReceiptBubble: View {
     let changedRecords: [ChangedCRMRecord]
     let open: ((ChangedCRMRecord) -> Void)?
+    let startPrompt: (String) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -715,12 +863,66 @@ private struct ReceiptBubble: View {
                         }
                     }
                 }
+                if !nextPrompts.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(nextPrompts) { prompt in
+                            Button {
+                                startPrompt(prompt.prompt)
+                            } label: {
+                                Label(prompt.title, systemImage: prompt.systemImage)
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
             }
             .padding(12)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             Spacer(minLength: 36)
         }
     }
+
+    private var nextPrompts: [ReceiptPromptAction] {
+        var actions: [ReceiptPromptAction] = []
+        if let record = changedRecords.first(where: { $0.kind == .contact && $0.canOpen }) {
+            actions.append(ReceiptPromptAction(
+                title: "Add follow-up",
+                systemImage: "bell.badge",
+                prompt: "Create a follow-up for \(record.title)"
+            ))
+        } else if let record = changedRecords.first(where: { $0.kind == .opportunity && $0.canOpen }) {
+            actions.append(ReceiptPromptAction(
+                title: "Add follow-up",
+                systemImage: "bell.badge",
+                prompt: "Create a follow-up for the opportunity \(record.title)"
+            ))
+        }
+
+        if let record = changedRecords.first(where: { $0.kind == .opportunity && $0.canOpen }) {
+            actions.append(ReceiptPromptAction(
+                title: "Mark proposal sent",
+                systemImage: "paperplane",
+                prompt: "Move the opportunity \(record.title) to proposal sent"
+            ))
+        }
+
+        actions.append(ReceiptPromptAction(
+            title: "What's due next?",
+            systemImage: "calendar.badge.clock",
+            prompt: "What is due next in my pipeline?"
+        ))
+        return Array(actions.prefix(3))
+    }
+}
+
+private struct ReceiptPromptAction: Identifiable {
+    let id = UUID()
+    var title: String
+    var systemImage: String
+    var prompt: String
 }
 
 private struct ReceiptRecordRow: View {

@@ -25,8 +25,6 @@ struct AgentTurn: Codable, Sendable {
 
     @Guide(.maximumCount(6))
     var proposedChanges: [ProposedChange]
-
-    var spokenConfirmation: String?
 }
 
 /// Reviewable proposal payload shown on result cards and applied by
@@ -37,7 +35,6 @@ struct AgentDraft: Sendable {
     var detectedFacts: [DetectedFact]
     var proposedChanges: [ProposedChange]
     var clarification: ClarificationPrompt?
-    var spokenConfirmation: String
 }
 
 @Generable
@@ -141,9 +138,22 @@ struct AgentRunResult: Identifiable {
     var timeline: [AgentTimelineItem]
     var availabilityMessage: String
     var errorMessage: String?
+    var followUpOverviewItems: [AgentFollowUpOverviewItem] = []
     /// Old -> new field diffs per `ProposedChange.id`, resolved against the
     /// current local records when the result is shown for review.
     var diffs: [String: [ProposedChangeDiffField]] = [:]
+}
+
+struct AgentFollowUpOverviewItem: Identifiable, Hashable, Sendable {
+    var id: UUID
+    var title: String
+    var dueDateText: String
+    var contactTitle: String?
+    var opportunityTitle: String?
+
+    var changedRecord: ChangedCRMRecord {
+        ChangedCRMRecord(id: id, kind: .followUp, title: title)
+    }
 }
 
 struct ProposedChangeDiffField: Identifiable, Hashable {
@@ -249,7 +259,6 @@ struct AgentTimelineItem: Identifiable, Hashable {
 }
 
 struct ChangeExecutionResult {
-    var spokenSummary: String
     var changedRecords: [ChangedCRMRecord]
 }
 
@@ -308,10 +317,9 @@ extension AgentTurn {
                     "type": .string("array"),
                     "maxItems": .number(6),
                     "items": proposedChangeSchema
-                ]),
-                "spokenConfirmation": .nullableString()
+                ])
             ]),
-            "required": .stringArray(["thought", "kind", "message", "clarification", "detectedFacts", "proposedChanges", "spokenConfirmation"])
+            "required": .stringArray(["thought", "kind", "message", "clarification", "detectedFacts", "proposedChanges"])
         ])
     }
 
@@ -451,8 +459,7 @@ extension AgentTurn {
             summary: message,
             detectedFacts: detectedFacts,
             proposedChanges: proposedChanges,
-            clarification: clarification,
-            spokenConfirmation: spokenConfirmation ?? ""
+            clarification: clarification
         )
     }
 }
@@ -471,8 +478,7 @@ extension AgentDraft {
             summary: "",
             detectedFacts: [],
             proposedChanges: [],
-            clarification: nil,
-            spokenConfirmation: ""
+            clarification: nil
         )
     }
 }

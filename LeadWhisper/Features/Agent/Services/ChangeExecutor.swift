@@ -186,7 +186,6 @@ struct ChangeExecutor {
         AppLog.executor.info("Draft applied changedRecords=\(changedRecords.count, privacy: .public) interactionID=\(interaction.id.uuidString, privacy: .public)")
 
         return ChangeExecutionResult(
-            spokenSummary: draft.spokenConfirmation.nilIfBlank ?? "Done. I saved the CRM updates locally.",
             changedRecords: changedRecords
         )
     }

@@ -336,8 +336,7 @@ private extension AgentDraftValidator {
                     options: options,
                     allowsFreeText: true,
                     placeholder: placeholder
-                ),
-                spokenConfirmation: ""
+                )
             ),
             timeline: timeline + [
                 AgentTimelineItem(title: "Draft validation", detail: "Blocked an unsafe or incomplete model draft.", systemImage: "shield.lefthalf.filled")

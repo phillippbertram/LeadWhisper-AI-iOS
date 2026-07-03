@@ -32,12 +32,12 @@ struct ContactsView: View {
                 .navigationTitle("Contacts")
                 .searchable(text: $searchText, prompt: "Search contacts")
                 .talkFloatingAction {
-                    sheet = .agent
+                    sheet = .agent(initialPrompt: nil)
                 }
                 .sheet(item: $sheet) { sheet in
                     switch sheet {
-                    case .agent:
-                        AgentComposerSheetView()
+                    case .agent(let initialPrompt):
+                        AgentComposerSheetView(initialPrompt: initialPrompt)
                     case .editContact(let contact):
                         ContactEditView(contact: contact)
                     case .editFollowUp(let task):
@@ -87,7 +87,7 @@ struct ContactsView: View {
                 Text("Capture a lead update to create your first local contact.")
             } actions: {
                 Button {
-                    sheet = .agent
+                    sheet = .agent(initialPrompt: nil)
                 } label: {
                     Label("Type Update", systemImage: "keyboard")
                 }
@@ -99,7 +99,7 @@ struct ContactsView: View {
                 Text("Try a different name, company, or tag.")
             } actions: {
                 Button {
-                    sheet = .agent
+                    sheet = .agent(initialPrompt: nil)
                 } label: {
                     Label("Type Update", systemImage: "keyboard")
                 }
@@ -116,13 +116,23 @@ struct ContactsView: View {
                     ContactDetailView(
                         contact: contact,
                         editContact: { sheet = .editContact(contact) },
+                        startAgent: { sheet = .agent(initialPrompt: agentPrompt(for: contact)) },
                         editFollowUp: { sheet = .editFollowUp($0) },
+                        updateFollowUpWithAgent: { sheet = .agent(initialPrompt: agentPrompt(for: $0, contact: contact)) },
                         markFollowUpDone: { task in perform { try $0.markFollowUpDone(task) } },
                         archiveFollowUp: { task in perform { try $0.archiveFollowUp(task) } },
                         deleteFollowUp: { pendingDeleteFollowUp = $0 }
                     )
                 } label: {
                     ContactRow(contact: contact)
+                }
+                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                    Button {
+                        sheet = .agent(initialPrompt: agentPrompt(for: contact))
+                    } label: {
+                        Label("Agent", systemImage: "sparkles")
+                    }
+                    .tint(.blue)
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button {
@@ -150,17 +160,28 @@ struct ContactsView: View {
             actionError = PresentableError(error)
         }
     }
+
+    private func agentPrompt(for contact: Contact) -> String {
+        if contact.company.isEmpty {
+            return "Update \(contact.fullName)"
+        }
+        return "Update \(contact.fullName) at \(contact.company)"
+    }
+
+    private func agentPrompt(for task: FollowUpTask, contact: Contact) -> String {
+        "Update the follow-up \(task.title) for \(contact.fullName)"
+    }
 }
 
 private enum ContactsSheet: Identifiable {
-    case agent
+    case agent(initialPrompt: String?)
     case editContact(Contact)
     case editFollowUp(FollowUpTask)
 
     var id: String {
         switch self {
-        case .agent:
-            "agent"
+        case .agent(let initialPrompt):
+            "agent-\(initialPrompt ?? "blank")"
         case .editContact(let contact):
             "editContact-\(contact.id.uuidString)"
         case .editFollowUp(let task):
@@ -217,7 +238,9 @@ private struct ContactRow: View {
 private struct ContactDetailView: View {
     let contact: Contact
     let editContact: () -> Void
+    let startAgent: () -> Void
     let editFollowUp: (FollowUpTask) -> Void
+    let updateFollowUpWithAgent: (FollowUpTask) -> Void
     let markFollowUpDone: (FollowUpTask) -> Void
     let archiveFollowUp: (FollowUpTask) -> Void
     let deleteFollowUp: (FollowUpTask) -> Void
@@ -259,6 +282,13 @@ private struct ContactDetailView: View {
                         LabeledContent(task.title, value: task.dueDateText.isEmpty ? task.state.title : task.dueDateText)
                             .swipeActions(edge: .leading, allowsFullSwipe: false) {
                                 Button {
+                                    updateFollowUpWithAgent(task)
+                                } label: {
+                                    Label("Agent", systemImage: "sparkles")
+                                }
+                                .tint(.blue)
+
+                                Button {
                                     markFollowUpDone(task)
                                 } label: {
                                     Label("Done", systemImage: "checkmark")
@@ -293,6 +323,14 @@ private struct ContactDetailView: View {
         }
         .navigationTitle(contact.fullName)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    startAgent()
+                } label: {
+                    Label("Agent", systemImage: "sparkles")
+                }
+            }
+
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     editContact()

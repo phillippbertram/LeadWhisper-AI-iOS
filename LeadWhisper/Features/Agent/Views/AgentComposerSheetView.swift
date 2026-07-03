@@ -2,10 +2,11 @@ import SwiftUI
 
 struct AgentComposerSheetView: View {
     @Environment(\.dismiss) private var dismiss
+    var initialPrompt: String?
 
     var body: some View {
         NavigationStack {
-            AgentComposerView()
+            AgentComposerView(initialPrompt: initialPrompt)
                 .navigationTitle("Agent")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(.regularMaterial, for: .navigationBar)

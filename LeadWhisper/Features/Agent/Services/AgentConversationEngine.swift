@@ -132,6 +132,10 @@ final class AgentConversationEngine {
             appendUserContext(trimmed)
         }
 
+        if let dueOverview = await dueOverviewResult(for: trimmed, availabilityMessage: client.availabilityMessage) {
+            return await finalizeLocalReply(dueOverview, userMessage: trimmed)
+        }
+
         guard client.isAvailable else {
             return await resultWithContextRefresh(unavailableResult(client: client))
         }
@@ -217,6 +221,20 @@ final class AgentConversationEngine {
         return result
     }
 
+    private func finalizeLocalReply(_ result: AgentRunResult, userMessage: String) async -> AgentRunResult {
+        if !userMessage.isEmpty {
+            contextMemory.recordUserMessage(userMessage)
+        }
+        contextMemory.record(result)
+
+        if contextMemory.shouldRefreshSession {
+            refreshSession(reason: "rollingWindow")
+        }
+
+        await updateContextWindowUsage()
+        return result
+    }
+
     private func applyClarificationGuard(to result: AgentRunResult) -> (result: AgentRunResult, stoppedLoop: Bool) {
         guard result.kind == .clarify || result.draft.clarification != nil else {
             resetClarificationTracking()
@@ -280,6 +298,167 @@ final class AgentConversationEngine {
             AppLog.agent.error("Agent local snapshot failed error=\(error.localizedDescription, privacy: .public)")
             return CRMDataSnapshot(contacts: [], opportunities: [], followUps: [])
         }
+    }
+
+    private func dueOverviewResult(for userMessage: String, availabilityMessage: String) async -> AgentRunResult? {
+        guard isDueOverviewQuestion(userMessage) else { return nil }
+
+        let snapshot = await localSnapshot()
+        let followUps = followUpOverviewItems(from: snapshot)
+        return AgentRunResult(
+            kind: .reply,
+            message: followUpOverviewMessage(itemCount: followUps.count),
+            thought: "Answered a follow-up due overview from the local CRM snapshot.",
+            draft: .empty,
+            timeline: [
+                AgentTimelineItem(
+                    title: "Local follow-up overview",
+                    detail: "Read the local CRM snapshot and listed up to 3 open follow-ups. No changes were drafted.",
+                    systemImage: "calendar.badge.clock"
+                )
+            ],
+            availabilityMessage: availabilityMessage,
+            errorMessage: nil,
+            followUpOverviewItems: followUps
+        )
+    }
+
+    private func isDueOverviewQuestion(_ message: String) -> Bool {
+        let key = intentSearchKey(for: message)
+        guard !key.isEmpty, !hasMutationIntent(key) else { return false }
+
+        let phrases = [
+            "due next",
+            "due right now",
+            "due today",
+            "what is due",
+            "what s due",
+            "whats due",
+            "what due",
+            "due in my pipeline",
+            "next follow up",
+            "next follow ups",
+            "open follow ups",
+            "follow ups due",
+            "follow up due",
+            "was ist faellig",
+            "was ist fallig",
+            "was steht an",
+            "was steht als naechstes an",
+            "was steht als nachstes an",
+            "naechste follow ups",
+            "nachste follow ups",
+            "naechste aufgaben",
+            "nachste aufgaben"
+        ]
+
+        if phrases.contains(where: { key.contains($0) }) {
+            return true
+        }
+
+        let tokens = Set(key.split(separator: " ").map(String.init))
+        let hasDueToken = tokens.contains("due") ||
+            tokens.contains("faellig") ||
+            tokens.contains("fallig") ||
+            tokens.contains("anstehend") ||
+            tokens.contains("offen")
+        let hasOverviewToken = tokens.contains("what") ||
+            tokens.contains("next") ||
+            tokens.contains("right") ||
+            tokens.contains("now") ||
+            tokens.contains("today") ||
+            tokens.contains("pipeline") ||
+            tokens.contains("follow") ||
+            tokens.contains("followup") ||
+            tokens.contains("followups") ||
+            tokens.contains("was") ||
+            tokens.contains("steht") ||
+            tokens.contains("an") ||
+            tokens.contains("naechste") ||
+            tokens.contains("nachste") ||
+            tokens.contains("aufgaben")
+
+        return hasDueToken && hasOverviewToken
+    }
+
+    private func hasMutationIntent(_ key: String) -> Bool {
+        let mutationWords = [
+            "mark",
+            "complete",
+            "done",
+            "archive",
+            "delete",
+            "remove",
+            "move",
+            "create",
+            "add",
+            "update",
+            "change",
+            "edit",
+            "revise",
+            "save",
+            "set",
+            "finish",
+            "close",
+            "erledige",
+            "erledigen",
+            "abschliessen",
+            "archivieren",
+            "loeschen",
+            "loschen",
+            "verschiebe",
+            "verschieben",
+            "erstelle",
+            "erstellen",
+            "aendere",
+            "andere",
+            "bearbeite",
+            "speichern",
+            "setze"
+        ]
+
+        return mutationWords.contains { word in
+            key == word ||
+                key.hasPrefix("\(word) ") ||
+                key.contains(" \(word) ") ||
+                key.hasSuffix(" \(word)")
+        }
+    }
+
+    private func intentSearchKey(for message: String) -> String {
+        let characters = message.searchKey.map { character in
+            character.isLetter || character.isNumber ? character : " "
+        }
+        return String(characters)
+            .split(separator: " ")
+            .joined(separator: " ")
+    }
+
+    private func followUpOverviewItems(from snapshot: CRMDataSnapshot) -> [AgentFollowUpOverviewItem] {
+        let openFollowUps = snapshot.followUps.filter { $0.state == FollowUpState.open.rawValue }
+        let contactsByID = Dictionary(uniqueKeysWithValues: snapshot.contacts.map { ($0.id, $0.fullName) })
+        let opportunitiesByID = Dictionary(uniqueKeysWithValues: snapshot.opportunities.map { ($0.id, $0.title) })
+
+        return openFollowUps.prefix(3).compactMap { followUp in
+            guard let id = UUID(uuidString: followUp.id) else { return nil }
+            return AgentFollowUpOverviewItem(
+                id: id,
+                title: followUp.title,
+                dueDateText: followUp.dueDateText.nilIfBlank ?? "No due date",
+                contactTitle: followUp.contactID.flatMap { contactsByID[$0]?.nilIfBlank },
+                opportunityTitle: followUp.opportunityID.flatMap { opportunitiesByID[$0]?.nilIfBlank }
+            )
+        }
+    }
+
+    private func followUpOverviewMessage(itemCount: Int) -> String {
+        if itemCount == 0 {
+            return "No open follow-ups are due right now."
+        }
+        if itemCount == 1 {
+            return "Here is the next follow-up:"
+        }
+        return "Here are the next \(itemCount) follow-ups:"
     }
 
     private func respondWithTimeout(

@@ -20,12 +20,12 @@ struct OpportunitiesView: View {
             content
                 .navigationTitle("Opportunities")
                 .talkFloatingAction {
-                    sheet = .agent
+                    sheet = .agent(initialPrompt: nil)
                 }
                 .sheet(item: $sheet) { sheet in
                     switch sheet {
-                    case .agent:
-                        AgentComposerSheetView()
+                    case .agent(let initialPrompt):
+                        AgentComposerSheetView(initialPrompt: initialPrompt)
                     case .editOpportunity(let opportunity):
                         OpportunityEditView(opportunity: opportunity)
                     }
@@ -59,7 +59,7 @@ struct OpportunitiesView: View {
                 Text("Capture a lead update to start building your local pipeline.")
             } actions: {
                 Button {
-                    sheet = .agent
+                    sheet = .agent(initialPrompt: nil)
                 } label: {
                     Label("Type Update", systemImage: "keyboard")
                 }
@@ -76,6 +76,14 @@ struct OpportunitiesView: View {
                     Section(stage.title) {
                         ForEach(stageOpportunities) { opportunity in
                             OpportunityRow(opportunity: opportunity)
+                                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                    Button {
+                                        sheet = .agent(initialPrompt: agentPrompt(for: opportunity))
+                                    } label: {
+                                        Label("Agent", systemImage: "sparkles")
+                                    }
+                                    .tint(.blue)
+                                }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                     Button {
                                         pendingDeleteOpportunity = opportunity
@@ -105,16 +113,23 @@ struct OpportunitiesView: View {
             actionError = PresentableError(error)
         }
     }
+
+    private func agentPrompt(for opportunity: Opportunity) -> String {
+        if opportunity.company.isEmpty {
+            return "Update the opportunity \(opportunity.title)"
+        }
+        return "Update the opportunity \(opportunity.title) at \(opportunity.company)"
+    }
 }
 
 private enum OpportunitiesSheet: Identifiable {
-    case agent
+    case agent(initialPrompt: String?)
     case editOpportunity(Opportunity)
 
     var id: String {
         switch self {
-        case .agent:
-            "agent"
+        case .agent(let initialPrompt):
+            "agent-\(initialPrompt ?? "blank")"
         case .editOpportunity(let opportunity):
             "editOpportunity-\(opportunity.id.uuidString)"
         }

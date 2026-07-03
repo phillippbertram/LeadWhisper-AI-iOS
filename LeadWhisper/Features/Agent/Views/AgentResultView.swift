@@ -3,15 +3,29 @@ import SwiftUI
 struct AgentResultView: View {
     let runResult: AgentRunResult
     var showsActions = true
-    let save: (Set<String>) -> Void
+    let save: ([ProposedChange], Set<String>) -> Void
     let cancel: () -> Void
 
     @AppStorage(AgentSettings.debugModeKey) private var isDebugModeEnabled = false
     @State private var showsDetails = false
     @State private var deselectedChangeIDs: Set<String> = []
+    @State private var editableChanges: [ProposedChange]
+
+    init(
+        runResult: AgentRunResult,
+        showsActions: Bool = true,
+        save: @escaping ([ProposedChange], Set<String>) -> Void,
+        cancel: @escaping () -> Void
+    ) {
+        self.runResult = runResult
+        self.showsActions = showsActions
+        self.save = save
+        self.cancel = cancel
+        _editableChanges = State(initialValue: runResult.draft.proposedChanges)
+    }
 
     private var selectedChangeIDs: Set<String> {
-        Set(runResult.draft.proposedChanges.map(\.id)).subtracting(deselectedChangeIDs)
+        Set(editableChanges.map(\.id)).subtracting(deselectedChangeIDs)
     }
 
     var body: some View {
@@ -41,9 +55,9 @@ struct AgentResultView: View {
 
             if let clarification = runResult.draft.clarification {
                 ClarificationPromptView(clarification: clarification)
-            } else if !runResult.draft.proposedChanges.isEmpty {
+            } else if !editableChanges.isEmpty {
                 ProposedChangesView(
-                    changes: runResult.draft.proposedChanges,
+                    changes: $editableChanges,
                     diffs: runResult.diffs,
                     selectedCount: selectedChangeIDs.count,
                     isSelectable: showsActions,
@@ -135,7 +149,7 @@ struct AgentResultView: View {
 
     private var saveButton: some View {
         Button {
-            save(selectedChangeIDs)
+            save(editableChanges, selectedChangeIDs)
         } label: {
             Label(saveButtonTitle, systemImage: "checkmark")
                 .lineLimit(1)
@@ -147,7 +161,7 @@ struct AgentResultView: View {
     }
 
     private var saveButtonTitle: String {
-        let total = runResult.draft.proposedChanges.count
+        let total = editableChanges.count
         let selected = selectedChangeIDs.count
         guard total > 1, selected < total else { return "Save Changes" }
         return "Save \(selected) of \(total)"
@@ -210,7 +224,7 @@ private struct DetectedFactsView: View {
 }
 
 private struct ProposedChangesView: View {
-    let changes: [ProposedChange]
+    @Binding var changes: [ProposedChange]
     let diffs: [String: [ProposedChangeDiffField]]
     let selectedCount: Int
     let isSelectable: Bool
@@ -224,9 +238,9 @@ private struct ProposedChangesView: View {
                 selectedCount: selectedCount,
                 isSelectable: isSelectable
             )
-            ForEach(changes) { change in
+            ForEach($changes) { $change in
                 ProposedChangeCard(
-                    change: change,
+                    change: $change,
                     diff: diffs[change.id],
                     isSelectable: isSelectable,
                     isSelected: isSelected(change.id),
@@ -292,11 +306,12 @@ private struct AgentNoticeView: View {
 }
 
 private struct ProposedChangeCard: View {
-    let change: ProposedChange
+    @Binding var change: ProposedChange
     let diff: [ProposedChangeDiffField]?
     let isSelectable: Bool
     let isSelected: Bool
     let toggleSelection: () -> Void
+    @State private var isEditing = false
 
     private var isDestructive: Bool {
         change.action.isDestructive
@@ -335,11 +350,29 @@ private struct ProposedChangeCard: View {
                             .background(Color(.tertiarySystemFill), in: Capsule())
                     }
                 }
+                if isSelectable, change.action.supportsInlineEdit {
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            isEditing.toggle()
+                        }
+                    } label: {
+                        Image(systemName: isEditing ? "checkmark.circle" : "pencil.circle")
+                            .font(.headline)
+                            .foregroundStyle(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isEditing ? "Finish editing \(change.title)" : "Edit \(change.title)")
+                }
             }
 
             ProposedChangeDetails(change: change, diff: diff)
                 .font(.footnote)
                 .opacity(isSelected ? 1 : 0.45)
+
+            if isEditing {
+                ProposedChangeInlineEditor(change: $change)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -420,6 +453,84 @@ private struct ProposedChangeDetails: View {
     }
 }
 
+private struct ProposedChangeInlineEditor: View {
+    @Binding var change: ProposedChange
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if change.action.hasOpportunityFields {
+                Picker("Stage", selection: stageBinding) {
+                    ForEach(OpportunityStage.allCases) { stage in
+                        Text(stage.title).tag(stage)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                TextField("Estimated value EUR", text: estimatedValueBinding)
+                    .keyboardType(.numberPad)
+                TextField("Budget note", text: textBinding(\.budgetText))
+                TextField("Expected start", text: textBinding(\.expectedStart))
+            }
+
+            if change.action.hasFollowUpFields {
+                TextField("Follow-up title", text: textBinding(\.followUpTitle))
+                TextField("Due date", text: textBinding(\.dueDateText))
+            }
+
+            TextField("Tags, separated by commas", text: tagsBinding)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Notes")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextEditor(text: textBinding(\.notes))
+                    .frame(minHeight: 76)
+                    .padding(6)
+                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .font(.footnote)
+        .textFieldStyle(.roundedBorder)
+        .padding(10)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.blue.opacity(0.16))
+        }
+    }
+
+    private var stageBinding: Binding<OpportunityStage> {
+        Binding(
+            get: { OpportunityStage.from(change.stage) ?? .lead },
+            set: { change.stage = $0.rawValue }
+        )
+    }
+
+    private var estimatedValueBinding: Binding<String> {
+        Binding(
+            get: { change.estimatedValueEUR.map(String.init) ?? "" },
+            set: { value in
+                let digits = value.filter(\.isNumber)
+                change.estimatedValueEUR = digits.isEmpty ? nil : Int(digits)
+            }
+        )
+    }
+
+    private var tagsBinding: Binding<String> {
+        Binding(
+            get: { change.tags.joined(separator: ", ") },
+            set: { change.tags = $0.tagsFromCommaSeparatedText() }
+        )
+    }
+
+    private func textBinding(_ keyPath: WritableKeyPath<ProposedChange, String?>) -> Binding<String> {
+        Binding(
+            get: { change[keyPath: keyPath] ?? "" },
+            set: { change[keyPath: keyPath] = $0.nilIfBlank }
+        )
+    }
+}
+
 private struct ChangeDetailRow: View {
     let title: String
     let value: String
@@ -497,6 +608,28 @@ private extension DetectedFactKind {
 }
 
 private extension ProposedChangeAction {
+    var supportsInlineEdit: Bool {
+        !isDestructive
+    }
+
+    var hasOpportunityFields: Bool {
+        switch self {
+        case .createOpportunity, .updateOpportunity, .updateOpportunityStage:
+            true
+        case .createContact, .updateContact, .createInteraction, .createFollowUp, .updateFollowUp, .completeFollowUp, .archiveFollowUps, .deleteContact, .deleteOpportunity, .deleteFollowUp:
+            false
+        }
+    }
+
+    var hasFollowUpFields: Bool {
+        switch self {
+        case .createFollowUp, .updateFollowUp:
+            true
+        case .createContact, .updateContact, .createOpportunity, .updateOpportunity, .updateOpportunityStage, .createInteraction, .completeFollowUp, .archiveFollowUps, .deleteContact, .deleteOpportunity, .deleteFollowUp:
+            false
+        }
+    }
+
     var displayTitle: String {
         switch self {
         case .createContact:

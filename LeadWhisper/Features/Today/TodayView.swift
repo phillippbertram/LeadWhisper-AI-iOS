@@ -39,6 +39,13 @@ struct TodayView: View {
                             FollowUpRow(task: task)
                                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
                                     Button {
+                                        sheet = .agent(initialPrompt: agentPrompt(for: task))
+                                    } label: {
+                                        Label("Agent", systemImage: "sparkles")
+                                    }
+                                    .tint(.blue)
+
+                                    Button {
                                         perform { try $0.markFollowUpDone(task) }
                                     } label: {
                                         Label("Done", systemImage: "checkmark")
@@ -83,12 +90,12 @@ struct TodayView: View {
             }
             .navigationTitle("Today")
             .talkFloatingAction {
-                sheet = .agent
+                sheet = .agent(initialPrompt: nil)
             }
             .sheet(item: $sheet) { sheet in
                 switch sheet {
-                case .agent:
-                    AgentComposerSheetView()
+                case .agent(let initialPrompt):
+                    AgentComposerSheetView(initialPrompt: initialPrompt)
                 case .editFollowUp(let task):
                     FollowUpEditView(task: task)
                 }
@@ -120,16 +127,26 @@ struct TodayView: View {
             actionError = PresentableError(error)
         }
     }
+
+    private func agentPrompt(for task: FollowUpTask) -> String {
+        var parts = ["Update the follow-up \(task.title)"]
+        if let contact = task.contact {
+            parts.append("for \(contact.fullName)")
+        } else if let opportunity = task.opportunity {
+            parts.append("for the opportunity \(opportunity.title)")
+        }
+        return parts.joined(separator: " ")
+    }
 }
 
 private enum TodaySheet: Identifiable {
-    case agent
+    case agent(initialPrompt: String?)
     case editFollowUp(FollowUpTask)
 
     var id: String {
         switch self {
-        case .agent:
-            "agent"
+        case .agent(let initialPrompt):
+            "agent-\(initialPrompt ?? "blank")"
         case .editFollowUp(let task):
             "editFollowUp-\(task.id.uuidString)"
         }
