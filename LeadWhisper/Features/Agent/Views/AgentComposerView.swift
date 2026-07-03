@@ -1201,6 +1201,7 @@ private struct ProcessingBubble: View {
                 isWorking: true,
                 accessibilityReduceMotion: accessibilityReduceMotion
             )
+            .beamBorder(AgentBeamMode.processing.avatarConfiguration, isEnabled: !accessibilityReduceMotion)
             Text(friendlyActivity)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -1789,4 +1790,3 @@ private struct ContextWindowUsageRing: View {
         .help("Context: \(usage.usedTokens)/\(usage.maximumTokens) tokens, \(usage.availableTokens) available")
     }
 }
-
