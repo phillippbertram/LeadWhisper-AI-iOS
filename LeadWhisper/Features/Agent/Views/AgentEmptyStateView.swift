@@ -1,11 +1,14 @@
 import SwiftUI
 
-struct AgentSuggestion: Identifiable {
-    let id = UUID()
+struct AgentSuggestion: Hashable, Identifiable {
     var title: String
     var subtitle: String?
     var systemImage: String
     var prompt: String
+
+    var id: String {
+        "\(title)|\(prompt)".searchKey
+    }
 }
 
 /// Hero shown while the conversation is empty, with tappable suggestions built
@@ -187,5 +190,186 @@ enum AgentSuggestionBuilder {
         }
 
         return Array(items.prefix(5))
+    }
+
+    static func contextualSuggestions(
+        from snapshot: CRMDataSnapshot,
+        prefersFollowUpActions: Bool = false
+    ) -> [AgentSuggestion] {
+        var items: [AgentSuggestion] = []
+
+        if prefersFollowUpActions,
+           let followUp = openFollowUp(from: snapshot) {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Complete \(followUp.title)",
+                    subtitle: followUp.dueDateText.nilIfBlank ?? "Mark this follow-up as done",
+                    systemImage: "checkmark.circle",
+                    prompt: "Mark the follow-up \(followUp.title) as done"
+                ),
+                to: &items
+            )
+        }
+
+        if let opportunity = activeOpportunity(from: snapshot) {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Create follow-up",
+                    subtitle: opportunity.title,
+                    systemImage: "bell.badge",
+                    prompt: "Create a follow-up for the opportunity \(opportunity.title)"
+                ),
+                to: &items
+            )
+
+            if shouldSuggestProposalSent(for: opportunity) {
+                appendUnique(
+                    AgentSuggestion(
+                        title: "Mark proposal sent",
+                        subtitle: opportunity.title,
+                        systemImage: "paperplane",
+                        prompt: "Move the opportunity \(opportunity.title) to proposal sent"
+                    ),
+                    to: &items
+                )
+            }
+        } else if let contact = snapshot.contacts.first {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Create follow-up",
+                    subtitle: contact.fullName,
+                    systemImage: "bell.badge",
+                    prompt: "Create a follow-up for \(contact.fullName)"
+                ),
+                to: &items
+            )
+        } else {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Create follow-up",
+                    subtitle: "I'll ask who it belongs to",
+                    systemImage: "bell.badge",
+                    prompt: "Create a follow-up"
+                ),
+                to: &items
+            )
+        }
+
+        if let followUp = openFollowUp(from: snapshot) {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Complete \(followUp.title)",
+                    subtitle: followUp.dueDateText.nilIfBlank ?? "Mark this follow-up as done",
+                    systemImage: "checkmark.circle",
+                    prompt: "Mark the follow-up \(followUp.title) as done"
+                ),
+                to: &items
+            )
+        }
+
+        if let contact = snapshot.contacts.first {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Update \(contact.fullName)",
+                    subtitle: contact.company.nilIfBlank ?? "Add a CRM update",
+                    systemImage: "square.and.pencil",
+                    prompt: "Update \(contact.fullName)"
+                ),
+                to: &items
+            )
+        } else {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Update a contact",
+                    subtitle: "I'll ask which one",
+                    systemImage: "square.and.pencil",
+                    prompt: "Update a contact"
+                ),
+                to: &items
+            )
+        }
+
+        appendUnique(
+            AgentSuggestion(
+                title: "What's due next?",
+                subtitle: "Open follow-ups and pipeline overview",
+                systemImage: "calendar.badge.clock",
+                prompt: "What is due next in my pipeline?"
+            ),
+            to: &items
+        )
+
+        return Array(items.prefix(4))
+    }
+
+    static func receiptSuggestions(from changedRecords: [ChangedCRMRecord]) -> [AgentSuggestion] {
+        var items: [AgentSuggestion] = []
+
+        if let record = changedRecords.first(where: { $0.kind == .contact && $0.canOpen }) {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Add follow-up",
+                    subtitle: record.title,
+                    systemImage: "bell.badge",
+                    prompt: "Create a follow-up for \(record.title)"
+                ),
+                to: &items
+            )
+        } else if let record = changedRecords.first(where: { $0.kind == .opportunity && $0.canOpen }) {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Add follow-up",
+                    subtitle: record.title,
+                    systemImage: "bell.badge",
+                    prompt: "Create a follow-up for the opportunity \(record.title)"
+                ),
+                to: &items
+            )
+        }
+
+        if let record = changedRecords.first(where: { $0.kind == .opportunity && $0.canOpen }) {
+            appendUnique(
+                AgentSuggestion(
+                    title: "Mark proposal sent",
+                    subtitle: record.title,
+                    systemImage: "paperplane",
+                    prompt: "Move the opportunity \(record.title) to proposal sent"
+                ),
+                to: &items
+            )
+        }
+
+        appendUnique(
+            AgentSuggestion(
+                title: "What's due next?",
+                subtitle: "Open follow-ups and pipeline overview",
+                systemImage: "calendar.badge.clock",
+                prompt: "What is due next in my pipeline?"
+            ),
+            to: &items
+        )
+
+        return Array(items.prefix(3))
+    }
+
+    private static func openFollowUp(from snapshot: CRMDataSnapshot) -> CRMFollowUpSnapshot? {
+        snapshot.followUps.first { $0.state == FollowUpState.open.rawValue }
+    }
+
+    private static func activeOpportunity(from snapshot: CRMDataSnapshot) -> CRMOpportunitySnapshot? {
+        snapshot.opportunities.first {
+            $0.stage != OpportunityStage.won.rawValue && $0.stage != OpportunityStage.lost.rawValue
+        } ?? snapshot.opportunities.first
+    }
+
+    private static func shouldSuggestProposalSent(for opportunity: CRMOpportunitySnapshot) -> Bool {
+        opportunity.stage != OpportunityStage.proposalSent.rawValue &&
+            opportunity.stage != OpportunityStage.won.rawValue &&
+            opportunity.stage != OpportunityStage.lost.rawValue
+    }
+
+    private static func appendUnique(_ suggestion: AgentSuggestion, to items: inout [AgentSuggestion]) {
+        guard !items.contains(where: { $0.id == suggestion.id }) else { return }
+        items.append(suggestion)
     }
 }

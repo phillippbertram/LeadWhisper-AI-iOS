@@ -24,6 +24,7 @@ struct AgentComposerView: View {
     @State private var analyzeTask: Task<Void, Never>?
     @State private var messages: [AgentConversationMessage] = []
     @State private var suggestions: [AgentSuggestion] = []
+    @State private var crmSnapshot = CRMDataSnapshot(contacts: [], opportunities: [], followUps: [])
     @State private var activeResultID: UUID?
     @State private var pendingDestructiveRun: PendingAgentSave?
     @State private var isProcessing = false
@@ -54,7 +55,6 @@ struct AgentComposerView: View {
                             message: message,
                             activeResultID: activeResultID,
                             openChangedRecord: openChangedRecord,
-                            startPrompt: submit,
                             save: saveDraft,
                             cancel: cancelDraft
                         )
@@ -85,19 +85,24 @@ struct AgentComposerView: View {
             .animation(entryAnimation(delay: 0), value: hasShownEntryAnimation)
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
-                    if !activeClarificationOptions.isEmpty {
+                    if activeReviewResult != nil {
+                        DraftRevisionStatusBar(
+                            isEnabled: !isProcessing,
+                            cancel: cancelActiveDraft
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    } else if !activeClarificationOptions.isEmpty {
                         ClarificationActionBar(
                             options: activeClarificationOptions,
                             isEnabled: !isProcessing,
                             select: submit
                         )
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    }
-
-                    if activeReviewResult != nil {
-                        DraftRevisionStatusBar(
+                    } else if !activeSuggestedActions.isEmpty {
+                        SuggestedActionBar(
+                            suggestions: activeSuggestedActions,
                             isEnabled: !isProcessing,
-                            cancel: cancelActiveDraft
+                            select: submit
                         )
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
@@ -128,6 +133,7 @@ struct AgentComposerView: View {
                 .offset(y: entryOffset(for: .inputBar))
                 .animation(entryAnimation(delay: 0.12), value: hasShownEntryAnimation)
                 .animation(.snappy(duration: 0.18), value: activeClarificationOptions)
+                .animation(.snappy(duration: 0.18), value: activeSuggestedActions.map(\.id))
                 .animation(.snappy(duration: 0.18), value: activeResultID)
             }
             .onAppear {
@@ -268,6 +274,30 @@ struct AgentComposerView: View {
         return "Tell me what changed with a lead..."
     }
 
+    private var activeSuggestedActions: [AgentSuggestion] {
+        guard !isProcessing,
+              !messages.isEmpty,
+              activeReviewResult == nil,
+              activeClarification == nil,
+              let lastMessage = messages.last else {
+            return []
+        }
+
+        switch lastMessage.content {
+        case .assistant:
+            return AgentSuggestionBuilder.contextualSuggestions(from: crmSnapshot)
+        case .followUpOverview:
+            return AgentSuggestionBuilder.contextualSuggestions(from: crmSnapshot, prefersFollowUpActions: true)
+        case .receipt(let changedRecords):
+            return AgentSuggestionBuilder.receiptSuggestions(from: changedRecords)
+        case .result(let runResult, _):
+            guard runResult.errorMessage == nil else { return [] }
+            return AgentSuggestionBuilder.contextualSuggestions(from: crmSnapshot)
+        case .user:
+            return []
+        }
+    }
+
     private var entryOpacity: Double {
         accessibilityReduceMotion || hasShownEntryAnimation ? 1 : 0
     }
@@ -352,10 +382,13 @@ struct AgentComposerView: View {
     private func refreshSuggestions() {
         do {
             let snapshot = try Container.shared.crmRepository().snapshot()
+            crmSnapshot = snapshot
             suggestions = AgentSuggestionBuilder.suggestions(from: snapshot)
         } catch {
             AppLog.agent.error("Agent suggestions snapshot failed error=\(error.localizedDescription, privacy: .public)")
-            suggestions = AgentSuggestionBuilder.suggestions(from: CRMDataSnapshot(contacts: [], opportunities: [], followUps: []))
+            let emptySnapshot = CRMDataSnapshot(contacts: [], opportunities: [], followUps: [])
+            crmSnapshot = emptySnapshot
+            suggestions = AgentSuggestionBuilder.suggestions(from: emptySnapshot)
         }
     }
 
@@ -473,6 +506,7 @@ struct AgentComposerView: View {
             activeResultID = nil
             activeTranscript = ""
             engine.noteDraftSaved()
+            refreshSuggestions()
             messages.append(.receipt(result.changedRecords))
             HapticFeedback.play(.success)
             AppLog.agent.info("Agent draft saved changedRecords=\(result.changedRecords.count, privacy: .public)")
@@ -648,7 +682,6 @@ private struct AgentMessageRow: View {
     let message: AgentConversationMessage
     let activeResultID: UUID?
     let openChangedRecord: ((ChangedCRMRecord) -> Void)?
-    let startPrompt: (String) -> Void
     let save: (AgentRunResult, String, [ProposedChange], Set<String>) -> Void
     let cancel: (AgentRunResult) -> Void
 
@@ -673,7 +706,7 @@ private struct AgentMessageRow: View {
             )
 
         case .receipt(let changedRecords):
-            ReceiptBubble(changedRecords: changedRecords, open: openChangedRecord, startPrompt: startPrompt)
+            ReceiptBubble(changedRecords: changedRecords, open: openChangedRecord)
         }
     }
 }
@@ -880,7 +913,6 @@ private struct AgentResultBubble: View {
 private struct ReceiptBubble: View {
     let changedRecords: [ChangedCRMRecord]
     let open: ((ChangedCRMRecord) -> Void)?
-    let startPrompt: (String) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -895,66 +927,12 @@ private struct ReceiptBubble: View {
                         }
                     }
                 }
-                if !nextPrompts.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(nextPrompts) { prompt in
-                            Button {
-                                startPrompt(prompt.prompt)
-                            } label: {
-                                Label(prompt.title, systemImage: prompt.systemImage)
-                                    .font(.caption.weight(.semibold))
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    }
-                    .padding(.top, 2)
-                }
             }
             .padding(12)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             Spacer(minLength: 36)
         }
     }
-
-    private var nextPrompts: [ReceiptPromptAction] {
-        var actions: [ReceiptPromptAction] = []
-        if let record = changedRecords.first(where: { $0.kind == .contact && $0.canOpen }) {
-            actions.append(ReceiptPromptAction(
-                title: "Add follow-up",
-                systemImage: "bell.badge",
-                prompt: "Create a follow-up for \(record.title)"
-            ))
-        } else if let record = changedRecords.first(where: { $0.kind == .opportunity && $0.canOpen }) {
-            actions.append(ReceiptPromptAction(
-                title: "Add follow-up",
-                systemImage: "bell.badge",
-                prompt: "Create a follow-up for the opportunity \(record.title)"
-            ))
-        }
-
-        if let record = changedRecords.first(where: { $0.kind == .opportunity && $0.canOpen }) {
-            actions.append(ReceiptPromptAction(
-                title: "Mark proposal sent",
-                systemImage: "paperplane",
-                prompt: "Move the opportunity \(record.title) to proposal sent"
-            ))
-        }
-
-        actions.append(ReceiptPromptAction(
-            title: "What's due next?",
-            systemImage: "calendar.badge.clock",
-            prompt: "What is due next in my pipeline?"
-        ))
-        return Array(actions.prefix(3))
-    }
-}
-
-private struct ReceiptPromptAction: Identifiable {
-    let id = UUID()
-    var title: String
-    var systemImage: String
-    var prompt: String
 }
 
 private struct ReceiptRecordRow: View {
@@ -1281,6 +1259,47 @@ private struct AgentPrivacyPopover: View {
         case .openAI:
             "Agent messages and local CRM lookup results are sent to OpenAI. Voice dictation uses Apple Speech when you use the mic. Proposed changes are still only saved after you review them."
         }
+    }
+}
+
+private struct SuggestedActionBar: View {
+    let suggestions: [AgentSuggestion]
+    let isEnabled: Bool
+    let select: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(suggestions) { suggestion in
+                    Button {
+                        select(suggestion.prompt)
+                    } label: {
+                        Label {
+                            Text(suggestion.title)
+                                .font(.footnote.weight(.semibold))
+                                .lineLimit(1)
+                        } icon: {
+                            Image(systemName: suggestion.systemImage)
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Color(.secondarySystemBackground), in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(.blue.opacity(0.16))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isEnabled)
+                    .accessibilityLabel(suggestion.title)
+                    .accessibilityHint(suggestion.subtitle ?? "")
+                }
+            }
+            .padding(.vertical, 1)
+        }
+        .scrollClipDisabled()
     }
 }
 
