@@ -16,10 +16,6 @@ struct ContentView: View {
                 OpportunitiesView()
             }
 
-            Tab("Agent", systemImage: "sparkles") {
-                AgentView()
-            }
-
             Tab("Settings", systemImage: "gearshape") {
                 SettingsView()
             }

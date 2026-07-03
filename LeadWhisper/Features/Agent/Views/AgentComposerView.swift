@@ -122,7 +122,8 @@ struct AgentComposerView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
                 .padding(.bottom, 10)
-                .background(.ultraThinMaterial)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.black)
                 .opacity(entryOpacity)
                 .offset(y: entryOffset(for: .inputBar))
                 .animation(entryAnimation(delay: 0.12), value: hasShownEntryAnimation)
@@ -149,6 +150,7 @@ struct AgentComposerView: View {
                 resetConversation()
             }
         }
+        .background(Color.black.ignoresSafeArea())
         .crmErrorAlert($actionError)
         .confirmationDialog(
             "Delete local data?",
