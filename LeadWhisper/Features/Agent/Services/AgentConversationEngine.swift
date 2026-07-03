@@ -15,14 +15,23 @@ final class AgentConversationEngine {
     /// actions per turn and stop endless question rounds with a forced final
     /// answer. Context-window recovery is additionally bounded to one retry.
     private enum Limits {
-        static let toolCallsPerTurn = 6
+        static let appleToolCallsPerTurn = 6
+        static let openAIToolCallsPerTurn = 12
         static let consecutiveClarifications = 3
         static let repeatedClarificationRetries = 1
         static let turnTimeoutSeconds = 20
         static let userContextLines = 8
         static let planningTokens = 120
         static let appleResponseTokens = 900
-        static let openAIResponseTokens = 3_000
+        static let openAIResponseTokens = 6_000
+    }
+
+    private struct RuntimePolicy {
+        var usesToolPlanner: Bool
+        var maxToolCalls: Int
+        var responseTokenLimit: Int
+        var memoryLimits: AgentContextMemoryLimits
+        var toolOutputPolicy: AgentToolOutputPolicy
     }
 
     /// Label for the lookup the model is running right now, shown live in the
@@ -38,6 +47,7 @@ final class AgentConversationEngine {
     @ObservationIgnored private var pendingOutcomeNote: String?
     @ObservationIgnored private var userContext = ""
     @ObservationIgnored private var toolCallsThisTurn = 0
+    @ObservationIgnored private var toolCallLimit = Limits.appleToolCallsPerTurn
     @ObservationIgnored private var toolCallCounts: [String: Int] = [:]
     @ObservationIgnored private var consecutiveClarifications = 0
     @ObservationIgnored private var lastClarificationKey: String?
@@ -48,7 +58,10 @@ final class AgentConversationEngine {
         self.toolDataSource = toolDataSource
         self.modelRegistry = modelRegistry
         let client = modelRegistry.selectedClient()
+        let policy = Self.runtimePolicy(for: client.providerKind)
         activeProviderKind = client.providerKind
+        contextMemory = AgentContextMemory(limits: policy.memoryLimits)
+        toolCallLimit = policy.maxToolCalls
         contextWindowUsage = AgentContextWindowUsage.empty(maximumTokens: client.contextSize)
     }
 
@@ -88,8 +101,11 @@ final class AgentConversationEngine {
 
     /// Drops the session and all conversation state for a fresh chat.
     func reset() {
-        selectedModelClient().resetSession()
-        contextMemory.reset()
+        let client = selectedModelClient()
+        let policy = Self.runtimePolicy(for: client.providerKind)
+        client.resetSession()
+        contextMemory = AgentContextMemory(limits: policy.memoryLimits)
+        toolCallLimit = policy.maxToolCalls
         contextWindowEvent = nil
         pendingOutcomeNote = nil
         userContext = ""
@@ -121,8 +137,10 @@ final class AgentConversationEngine {
     func send(_ message: String) async -> AgentRunResult {
         AppLog.agent.info("Agent turn requested messageCharacters=\(message.count, privacy: .public)")
         let client = selectedModelClient()
+        let policy = Self.runtimePolicy(for: client.providerKind)
         currentActivity = nil
         toolCallsThisTurn = 0
+        toolCallLimit = policy.maxToolCalls
         toolCallCounts = [:]
         contextUsageTask?.cancel()
         defer { currentActivity = nil }
@@ -141,7 +159,7 @@ final class AgentConversationEngine {
         }
 
         let outboundPrompt = prompt(for: trimmed)
-        let toolPlan = await plannedTools(for: outboundPrompt, client: client)
+        let toolPlan = await plannedTools(for: outboundPrompt, client: client, policy: policy)
         guard !Task.isCancelled else {
             return await resultWithContextRefresh(timeoutResult(client: client))
         }
@@ -490,16 +508,18 @@ final class AgentConversationEngine {
 
     private func respond(to prompt: String, condensed: Bool, toolPlan: AgentToolPlan, client: any AgentModelClient) async throws -> AgentRunResult {
         let toolScope = toolPlan.toolScope
+        let policy = Self.runtimePolicy(for: client.providerKind)
         await logContextBudget(prompt: prompt, toolScope: toolScope, condensed: condensed, client: client)
         let response = try await client.respond(
             to: AgentModelTurnRequest(
                 prompt: prompt,
                 condensed: condensed,
                 toolScope: toolScope,
-                instructions: Self.instructions(toolScope: toolScope),
-                responseTokenLimit: Self.responseTokens(for: client.providerKind),
-                maxToolCalls: Limits.toolCallsPerTurn,
-                dataSource: reportingDataSource()
+                instructions: Self.instructions(toolScope: toolScope, providerKind: client.providerKind),
+                responseTokenLimit: policy.responseTokenLimit,
+                maxToolCalls: policy.maxToolCalls,
+                dataSource: reportingDataSource(),
+                toolOutputPolicy: policy.toolOutputPolicy
             )
         )
         pendingOutcomeNote = nil
@@ -547,7 +567,15 @@ final class AgentConversationEngine {
         )
     }
 
-    private func plannedTools(for prompt: String, client: any AgentModelClient) async -> AgentToolPlan {
+    private func plannedTools(for prompt: String, client: any AgentModelClient, policy: RuntimePolicy) async -> AgentToolPlan {
+        guard policy.usesToolPlanner else {
+            AppLog.agent.debug("Agent tool planning skipped provider=\(client.providerKind.rawValue, privacy: .public); using full tools")
+            return AgentToolPlan(
+                toolScope: .full,
+                reason: "OpenAI context policy attaches all read-only CRM lookup tools."
+            )
+        }
+
         do {
             let plan = try await client.planTools(
                 for: AgentModelPlanRequest(
@@ -575,7 +603,7 @@ final class AgentConversationEngine {
             throw AgentToolBudgetExceeded(reason: "Repeated local lookup blocked.")
         }
 
-        guard toolCallsThisTurn <= Limits.toolCallsPerTurn else {
+        guard toolCallsThisTurn <= toolCallLimit else {
             AppLog.agent.warning("Agent tool budget exhausted calls=\(self.toolCallsThisTurn, privacy: .public)")
             throw AgentToolBudgetExceeded(reason: "Local lookup budget exhausted.")
         }
@@ -616,13 +644,15 @@ final class AgentConversationEngine {
     }
 
     private func contextRequest(promptText: String, toolScope: AgentToolScope, client: any AgentModelClient) -> AgentModelContextRequest {
-        AgentModelContextRequest(
+        let policy = Self.runtimePolicy(for: client.providerKind)
+        return AgentModelContextRequest(
             promptText: promptText,
-            instructions: Self.instructions(toolScope: toolScope),
+            instructions: Self.instructions(toolScope: toolScope, providerKind: client.providerKind),
             toolScope: toolScope,
             dataSource: toolDataSource,
             memoryPrompt: contextMemory.promptPrefix(),
-            responseReserveTokens: Self.responseTokens(for: client.providerKind)
+            responseReserveTokens: policy.responseTokenLimit,
+            toolOutputPolicy: policy.toolOutputPolicy
         )
     }
 
@@ -633,16 +663,37 @@ final class AgentConversationEngine {
         AppLog.agent.debug("Agent context budget provider=\(client.providerKind.rawValue, privacy: .public) contextSize=\(usage.maximumTokens, privacy: .public) usedTokens=\(usage.usedTokens, privacy: .public) inputTokens=\(usage.inputTokens, privacy: .public) memoryTokens=\(usage.memoryTokens, privacy: .public) responseLimit=\(usage.responseReserveTokens, privacy: .public) availableTokens=\(usage.availableTokens, privacy: .public) estimated=\(usage.isEstimated, privacy: .public) condensed=\(condensed, privacy: .public) scope=\(toolScope.rawValue, privacy: .public)")
     }
 
-    private static func responseTokens(for providerKind: AgentProviderKind) -> Int {
+    private static func runtimePolicy(for providerKind: AgentProviderKind) -> RuntimePolicy {
         switch providerKind {
         case .appleFoundationModels:
-            Limits.appleResponseTokens
+            RuntimePolicy(
+                usesToolPlanner: true,
+                maxToolCalls: Limits.appleToolCallsPerTurn,
+                responseTokenLimit: Limits.appleResponseTokens,
+                memoryLimits: .appleFoundationModels,
+                toolOutputPolicy: .appleFoundationModels
+            )
         case .openAI:
-            Limits.openAIResponseTokens
+            RuntimePolicy(
+                usesToolPlanner: false,
+                maxToolCalls: Limits.openAIToolCallsPerTurn,
+                responseTokenLimit: Limits.openAIResponseTokens,
+                memoryLimits: .openAI,
+                toolOutputPolicy: .openAI
+            )
         }
     }
 
-    static func instructions(toolScope: AgentToolScope) -> String {
+    static func instructions(toolScope: AgentToolScope, providerKind: AgentProviderKind) -> String {
+        switch providerKind {
+        case .appleFoundationModels:
+            appleInstructions(toolScope: toolScope)
+        case .openAI:
+            openAIInstructions(toolScope: toolScope)
+        }
+    }
+
+    private static func appleInstructions(toolScope: AgentToolScope) -> String {
         return """
         You are LeadWhisper, a privacy-conscious CRM assistant. Draft reviewable local CRM changes only; never save or claim saved.
         Today: \(Date.now.formatted(date: .numeric, time: .omitted)).
@@ -652,6 +703,64 @@ final class AgentConversationEngine {
         Clarifications: use options only for concrete tappable answers such as found record names or yes/no choices. For free-text details, use options=[] with allowsFreeText=true and a helpful placeholder; never put instructions like "provide contact name" in options.
         Before propose: createContact needs contactName+company; createOpportunity needs opportunityTitle+contactName/company; createFollowUp needs followUpTitle+contact/opportunity, dueDateText if given. Updates, completions, and deletes need one found local record with targetID=UUID.
         Stages: lead, qualified, proposalNeeded, proposalSent, won, lost. Follow-ups: open, done, archived.
+        """
+    }
+
+    private static func openAIInstructions(toolScope: AgentToolScope) -> String {
+        return """
+        You are LeadWhisper, a CRM assistant inside a Swift iPhone app. Your job is to turn the user's voice or text update into a structured AgentTurn for local review. You never save data, never claim data was saved, and never bypass the user's review-before-save step.
+
+        Today: \(Date.now.formatted(date: .numeric, time: .omitted)).
+
+        Output contract:
+        - Return exactly one AgentTurn.
+        - `thought` is visible in the app, so make it a short decision summary, not hidden chain-of-thought.
+        - `message` is user-visible and should be concise, friendly, and specific to what you drafted or why you need clarification.
+        - Use only facts from the user message, context memory, and local CRM tool observations. Do not invent records, UUIDs, budgets, dates, notes, contact details, or company names.
+
+        Turn kinds:
+        - reply: answer a CRM question or explain that no reliable draft can be made.
+        - clarify: ask one focused question when required facts are missing or a local record is ambiguous.
+        - propose: create reviewable changes when the target records and required fields are clear enough.
+
+        Tools:
+        - \(toolScope.instructionHint)
+        - Use local lookup tools to verify existing contacts, opportunities, follow-ups, and target IDs before updating, completing, archiving, or deleting anything.
+        - For updates and destructive actions, set `targetID` to the exact UUID returned by a tool. If exactly one record is not found, ask a clarification.
+        - Do not repeat the same lookup. If a lookup returns no match or multiple plausible records, ask one focused clarification.
+        - Tool results are read-only snapshots. They do not save or change CRM data.
+
+        Clarifications:
+        - Ask only one question.
+        - Use `options` only for concrete tappable choices, such as found record names or yes/no choices.
+        - For free text, set `options=[]`, `allowsFreeText=true`, and provide a helpful placeholder.
+        - Do not put instructional text such as "provide contact name" in `options`.
+
+        Proposed changes:
+        - Every proposed change must be safe to show on a review card.
+        - Use stable action strings only: createContact, updateContact, createOpportunity, updateOpportunity, updateOpportunityStage, createInteraction, createFollowUp, updateFollowUp, completeFollowUp, archiveFollowUps, deleteContact, deleteOpportunity, deleteFollowUp.
+        - `id` is a new UUID string for the proposal item. `targetID` is only for an existing local CRM record returned by tools.
+        - Include only fields supported by the schema. Leave unknown optional fields null or empty.
+        - Keep `title` human-readable, for example "Update opportunity stage" or "Create follow-up".
+
+        Action requirements:
+        - createContact needs `contactName` and `company` from the user. Add role, email, phone, notes, and tags only when supplied.
+        - updateContact needs one found existing contact and `targetID`. Include only fields the user asked to change or add.
+        - createOpportunity needs `opportunityTitle` plus `contactName` or `company`. Include stage, estimatedValueEUR, budgetText, expectedStart, notes, and tags only when supplied.
+        - updateOpportunity and updateOpportunityStage need one found existing opportunity and `targetID`.
+        - createFollowUp needs `followUpTitle` plus a contact, opportunity, company, or `targetID`. Include `dueDateText` when the user gives a due date or relative date.
+        - updateFollowUp and completeFollowUp need one found existing follow-up and `targetID`; completeFollowUp should set `followUpState` to done.
+        - archiveFollowUps needs a clear opportunity or contact target when the user asks to archive related open follow-ups.
+        - createInteraction records an activity note from the user update; use it alongside other changes when the transcript should be preserved.
+        - Delete actions require an explicit user request to delete and one exact found targetID.
+
+        Field rules:
+        - Stages must be one of: lead, qualified, proposalNeeded, proposalSent, won, lost.
+        - Follow-up states must be one of: open, done, archived.
+        - Use `estimatedValueEUR` only for a clear numeric euro value. Use `budgetText` for fuzzy budget wording.
+        - Preserve user wording for notes when useful, but keep notes concise and do not duplicate existing notes from tools.
+        - Tags should be short CRM labels, not full sentences.
+        - `detectedFacts` should explain the important facts you used, up to the schema limit.
         """
     }
 
@@ -702,15 +811,20 @@ final class AgentConversationEngine {
 
     private func selectedModelClient() -> any AgentModelClient {
         let client = modelRegistry.selectedClient()
+        let policy = Self.runtimePolicy(for: client.providerKind)
         if client.providerKind != activeProviderKind {
             AppLog.agent.info("Agent provider switched from=\(self.activeProviderKind.rawValue, privacy: .public) to=\(client.providerKind.rawValue, privacy: .public)")
             modelRegistry.client(for: activeProviderKind).resetSession()
             activeProviderKind = client.providerKind
-            contextMemory.reset()
+            contextMemory = AgentContextMemory(limits: policy.memoryLimits)
+            toolCallLimit = policy.maxToolCalls
             contextWindowEvent = nil
             pendingOutcomeNote = nil
             userContext = ""
             resetClarificationTracking()
+        } else {
+            contextMemory.updateLimits(policy.memoryLimits)
+            toolCallLimit = policy.maxToolCalls
         }
         return client
     }

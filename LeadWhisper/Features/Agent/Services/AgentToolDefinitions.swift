@@ -19,11 +19,21 @@ struct AgentToolDefinition {
 }
 
 enum AgentToolDefinitions {
-    static func definitions(for scope: AgentToolScope, dataSource: AgentToolDataSource) -> [AgentToolDefinition] {
-        scope.toolNames.compactMap { definition(named: $0, dataSource: dataSource) }
+    static func definitions(
+        for scope: AgentToolScope,
+        dataSource: AgentToolDataSource,
+        outputPolicy: AgentToolOutputPolicy
+    ) -> [AgentToolDefinition] {
+        scope.toolNames.compactMap {
+            definition(named: $0, dataSource: dataSource, outputPolicy: outputPolicy)
+        }
     }
 
-    static func definition(named name: String, dataSource: AgentToolDataSource) -> AgentToolDefinition? {
+    static func definition(
+        named name: String,
+        dataSource: AgentToolDataSource,
+        outputPolicy: AgentToolOutputPolicy
+    ) -> AgentToolDefinition? {
         switch name {
         case "findContacts":
             AgentToolDefinition(
@@ -36,9 +46,9 @@ enum AgentToolDefinitions {
                         AppLog.tools.warning("findContacts rejected empty query")
                         return ToolText.emptyQuery
                     }
-                    let matches = try await dataSource.contacts(query, ToolText.resultLimit)
+                    let matches = try await dataSource.contacts(query, outputPolicy.resultLimit)
                     AppLog.tools.debug("findContacts query=\(query, privacy: .private) returned=\(matches.count, privacy: .public)")
-                    return ToolText.contacts(matches)
+                    return ToolText.contacts(matches, policy: outputPolicy)
                 }
             )
 
@@ -53,9 +63,9 @@ enum AgentToolDefinitions {
                         AppLog.tools.warning("findOpportunities rejected empty query")
                         return ToolText.emptyQuery
                     }
-                    let matches = try await dataSource.opportunities(query, ToolText.resultLimit)
+                    let matches = try await dataSource.opportunities(query, outputPolicy.resultLimit)
                     AppLog.tools.debug("findOpportunities query=\(query, privacy: .private) returned=\(matches.count, privacy: .public)")
-                    return ToolText.opportunities(matches)
+                    return ToolText.opportunities(matches, policy: outputPolicy)
                 }
             )
 
@@ -70,9 +80,9 @@ enum AgentToolDefinitions {
                         AppLog.tools.warning("findFollowUps rejected empty query")
                         return ToolText.emptyQuery
                     }
-                    let matches = try await dataSource.followUps(query, ToolText.resultLimit)
+                    let matches = try await dataSource.followUps(query, outputPolicy.resultLimit)
                     AppLog.tools.debug("findFollowUps query=\(query, privacy: .private) returned=\(matches.count, privacy: .public)")
-                    return ToolText.followUps(matches)
+                    return ToolText.followUps(matches, policy: outputPolicy)
                 }
             )
 
@@ -89,7 +99,7 @@ enum AgentToolDefinitions {
                     }
                     let snapshot = try await dataSource.snapshot()
                     AppLog.tools.debug("getContactDetails query=\(query, privacy: .private)")
-                    return ToolText.contactDetails(snapshot, query: query)
+                    return ToolText.contactDetails(snapshot, query: query, policy: outputPolicy)
                 }
             )
 
@@ -109,7 +119,7 @@ enum AgentToolDefinitions {
                     let snapshot = try await dataSource.snapshot()
                     let focus = arguments["focus"]?.stringValue
                     AppLog.tools.debug("getPipelineSummary focus=\(focus ?? "-", privacy: .public) contacts=\(snapshot.contacts.count, privacy: .public) opportunities=\(snapshot.opportunities.count, privacy: .public) followUps=\(snapshot.followUps.count, privacy: .public)")
-                    return ToolText.pipelineSummary(snapshot, focus: focus)
+                    return ToolText.pipelineSummary(snapshot, focus: focus, policy: outputPolicy)
                 }
             )
 

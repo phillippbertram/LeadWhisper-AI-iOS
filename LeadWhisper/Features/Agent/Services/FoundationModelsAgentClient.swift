@@ -9,6 +9,7 @@ final class FoundationModelsAgentClient: AgentModelClient {
     private let model = SystemLanguageModel.default
     private var session: LanguageModelSession?
     private var activeToolScope: AgentToolScope?
+    private var activeToolOutputPolicy: AgentToolOutputPolicy?
     private var fallbackSessionTokens = 0
 
     var isAvailable: Bool {
@@ -29,13 +30,18 @@ final class FoundationModelsAgentClient: AgentModelClient {
 
     func prewarm(dataSource: AgentToolDataSource) {
         guard model.isAvailable else { return }
-        ensureSession(toolScope: .full, dataSource: dataSource).prewarm()
+        ensureSession(
+            toolScope: .full,
+            dataSource: dataSource,
+            outputPolicy: .appleFoundationModels
+        ).prewarm()
         AppLog.agent.debug("SystemLanguageModel prewarm requested at UI appear")
     }
 
     func resetSession() {
         session = nil
         activeToolScope = nil
+        activeToolOutputPolicy = nil
         fallbackSessionTokens = 0
     }
 
@@ -51,7 +57,11 @@ final class FoundationModelsAgentClient: AgentModelClient {
     }
 
     func respond(to request: AgentModelTurnRequest) async throws -> AgentModelTurnResponse {
-        let session = ensureSession(toolScope: request.toolScope, dataSource: request.dataSource)
+        let session = ensureSession(
+            toolScope: request.toolScope,
+            dataSource: request.dataSource,
+            outputPolicy: request.toolOutputPolicy
+        )
 
         // Greedy sampling makes extraction deterministic; temperature has no
         // effect under greedy, so it is intentionally omitted.
@@ -74,11 +84,16 @@ final class FoundationModelsAgentClient: AgentModelClient {
         let memoryTokens = try await measuredMemoryTokens(request.memoryPrompt)
         let baseTokens: Int
 
-        if let session, activeToolScope == request.toolScope {
+        if let session,
+           activeToolScope == request.toolScope,
+           activeToolOutputPolicy == request.toolOutputPolicy {
             baseTokens = try await measuredTranscriptTokens(for: session.transcript)
         } else {
             let instructions = Instructions(request.instructions)
-            let tools = request.toolScope.tools(dataSource: request.dataSource)
+            let tools = request.toolScope.tools(
+                dataSource: request.dataSource,
+                outputPolicy: request.toolOutputPolicy
+            )
             async let instructionsTokens = model.tokenCount(for: instructions)
             async let toolsTokens = model.tokenCount(for: tools)
             let countedInstructions = try await instructionsTokens
@@ -99,7 +114,9 @@ final class FoundationModelsAgentClient: AgentModelClient {
 
     func estimatedContextWindowUsage(for request: AgentModelContextRequest) -> AgentContextWindowUsage {
         let instructionsTokens = Self.roughTokenCount(request.instructions) + request.toolScope.toolCount * 90
-        let sessionTokens = activeToolScope == request.toolScope && fallbackSessionTokens > 0 ? fallbackSessionTokens : instructionsTokens
+        let sessionTokens = activeToolScope == request.toolScope &&
+            activeToolOutputPolicy == request.toolOutputPolicy &&
+            fallbackSessionTokens > 0 ? fallbackSessionTokens : instructionsTokens
         let inputTokens = Self.roughTokenCount(request.promptText)
         let schemaTokens = Self.roughTokenCount(AgentTurn.generationSchema.debugDescription)
         let usedTokens = min(contextSize, sessionTokens + inputTokens + schemaTokens)
@@ -126,16 +143,21 @@ final class FoundationModelsAgentClient: AgentModelClient {
         return message.contains("context window") || message.contains("model context")
     }
 
-    private func ensureSession(toolScope: AgentToolScope, dataSource: AgentToolDataSource) -> LanguageModelSession {
-        if let session, activeToolScope == toolScope {
+    private func ensureSession(
+        toolScope: AgentToolScope,
+        dataSource: AgentToolDataSource,
+        outputPolicy: AgentToolOutputPolicy
+    ) -> LanguageModelSession {
+        if let session, activeToolScope == toolScope, activeToolOutputPolicy == outputPolicy {
             return session
         }
 
-        let tools = toolScope.tools(dataSource: dataSource)
-        let instructions = AgentConversationEngine.instructions(toolScope: toolScope)
+        let tools = toolScope.tools(dataSource: dataSource, outputPolicy: outputPolicy)
+        let instructions = AgentConversationEngine.instructions(toolScope: toolScope, providerKind: providerKind)
         let session = LanguageModelSession(model: model, tools: tools, instructions: instructions)
         self.session = session
         activeToolScope = toolScope
+        activeToolOutputPolicy = outputPolicy
         fallbackSessionTokens = Self.roughTokenCount(instructions) + tools.count * 90
         AppLog.agent.debug("Agent conversation session created provider=apple scope=\(toolScope.rawValue, privacy: .public) tools=\(tools.count, privacy: .public)")
         return session
@@ -246,34 +268,34 @@ final class FoundationModelsAgentClient: AgentModelClient {
 }
 
 extension AgentToolScope {
-    func tools(dataSource: AgentToolDataSource) -> [any Tool] {
+    func tools(dataSource: AgentToolDataSource, outputPolicy: AgentToolOutputPolicy) -> [any Tool] {
         switch self {
         case .none:
             []
         case .contacts:
             [
-                FindContactsTool(dataSource: dataSource),
-                GetContactDetailsTool(dataSource: dataSource)
+                FindContactsTool(dataSource: dataSource, outputPolicy: outputPolicy),
+                GetContactDetailsTool(dataSource: dataSource, outputPolicy: outputPolicy)
             ]
         case .opportunities:
             [
-                FindOpportunitiesTool(dataSource: dataSource)
+                FindOpportunitiesTool(dataSource: dataSource, outputPolicy: outputPolicy)
             ]
         case .followUps:
             [
-                FindFollowUpsTool(dataSource: dataSource)
+                FindFollowUpsTool(dataSource: dataSource, outputPolicy: outputPolicy)
             ]
         case .pipeline:
             [
-                GetPipelineSummaryTool(dataSource: dataSource)
+                GetPipelineSummaryTool(dataSource: dataSource, outputPolicy: outputPolicy)
             ]
         case .full:
             [
-                FindContactsTool(dataSource: dataSource),
-                FindOpportunitiesTool(dataSource: dataSource),
-                FindFollowUpsTool(dataSource: dataSource),
-                GetContactDetailsTool(dataSource: dataSource),
-                GetPipelineSummaryTool(dataSource: dataSource)
+                FindContactsTool(dataSource: dataSource, outputPolicy: outputPolicy),
+                FindOpportunitiesTool(dataSource: dataSource, outputPolicy: outputPolicy),
+                FindFollowUpsTool(dataSource: dataSource, outputPolicy: outputPolicy),
+                GetContactDetailsTool(dataSource: dataSource, outputPolicy: outputPolicy),
+                GetPipelineSummaryTool(dataSource: dataSource, outputPolicy: outputPolicy)
             ]
         }
     }

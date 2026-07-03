@@ -1,5 +1,29 @@
 import Foundation
 
+struct AgentContextMemoryLimits: Sendable, Hashable {
+    var recentTurns: Int
+    var outcomes: Int
+    var relevantRecords: Int
+    var compactTextCharacters: Int
+    var refreshEveryTurns: Int?
+
+    static let appleFoundationModels = AgentContextMemoryLimits(
+        recentTurns: 4,
+        outcomes: 4,
+        relevantRecords: 8,
+        compactTextCharacters: 180,
+        refreshEveryTurns: 3
+    )
+
+    static let openAI = AgentContextMemoryLimits(
+        recentTurns: 10,
+        outcomes: 8,
+        relevantRecords: 20,
+        compactTextCharacters: 700,
+        refreshEveryTurns: nil
+    )
+}
+
 /// Compact continuity state that survives session resets without carrying the
 /// full Foundation Models transcript and completed tool calls forward.
 struct AgentContextMemory: Sendable {
@@ -8,14 +32,7 @@ struct AgentContextMemory: Sendable {
         case cancelled
     }
 
-    private enum Limits {
-        static let recentTurns = 4
-        static let outcomes = 4
-        static let relevantRecords = 8
-        static let compactTextCharacters = 180
-        static let refreshEveryTurns = 3
-    }
-
+    private var limits: AgentContextMemoryLimits
     private var recentTurns: [MemoryTurn] = []
     private var outcomes: [String] = []
     private var relevantRecords: [MemoryRecord] = []
@@ -23,8 +40,13 @@ struct AgentContextMemory: Sendable {
     private(set) var openClarification: String?
     private(set) var turnsSinceSessionRefresh = 0
 
+    init(limits: AgentContextMemoryLimits = .appleFoundationModels) {
+        self.limits = limits
+    }
+
     var shouldRefreshSession: Bool {
-        turnsSinceSessionRefresh >= Limits.refreshEveryTurns
+        guard let refreshEveryTurns = limits.refreshEveryTurns else { return false }
+        return turnsSinceSessionRefresh >= refreshEveryTurns
     }
 
     var estimatedTokenCount: Int {
@@ -73,11 +95,16 @@ struct AgentContextMemory: Sendable {
         appendOutcome("\(outcome.rawValue) \(summary)")
         pendingDraftSummary = nil
         openClarification = nil
-        turnsSinceSessionRefresh = Limits.refreshEveryTurns
+        turnsSinceSessionRefresh = limits.refreshEveryTurns ?? turnsSinceSessionRefresh
     }
 
     mutating func markSessionRefreshed() {
         turnsSinceSessionRefresh = 0
+    }
+
+    mutating func updateLimits(_ newLimits: AgentContextMemoryLimits) {
+        limits = newLimits
+        trimStoredCollections()
     }
 
     func promptPrefix() -> String? {
@@ -116,15 +143,15 @@ struct AgentContextMemory: Sendable {
     private mutating func appendTurn(role: String, text: String) {
         guard let compact = compactText(text) else { return }
         recentTurns.append(MemoryTurn(role: role, text: compact))
-        if recentTurns.count > Limits.recentTurns {
-            recentTurns.removeFirst(recentTurns.count - Limits.recentTurns)
+        if recentTurns.count > limits.recentTurns {
+            recentTurns.removeFirst(recentTurns.count - limits.recentTurns)
         }
     }
 
     private mutating func appendOutcome(_ outcome: String) {
         outcomes.append(compactText(outcome) ?? outcome)
-        if outcomes.count > Limits.outcomes {
-            outcomes.removeFirst(outcomes.count - Limits.outcomes)
+        if outcomes.count > limits.outcomes {
+            outcomes.removeFirst(outcomes.count - limits.outcomes)
         }
     }
 
@@ -144,8 +171,8 @@ struct AgentContextMemory: Sendable {
             }
         }
 
-        if relevantRecords.count > Limits.relevantRecords {
-            relevantRecords.removeFirst(relevantRecords.count - Limits.relevantRecords)
+        if relevantRecords.count > limits.relevantRecords {
+            relevantRecords.removeFirst(relevantRecords.count - limits.relevantRecords)
         }
     }
 
@@ -159,8 +186,20 @@ struct AgentContextMemory: Sendable {
 
     private func compactText(_ text: String) -> String? {
         guard let trimmed = text.nilIfBlank else { return nil }
-        guard trimmed.count > Limits.compactTextCharacters else { return trimmed }
-        return "\(trimmed.prefix(Limits.compactTextCharacters - 3))..."
+        guard trimmed.count > limits.compactTextCharacters else { return trimmed }
+        return "\(trimmed.prefix(limits.compactTextCharacters - 3))..."
+    }
+
+    private mutating func trimStoredCollections() {
+        if recentTurns.count > limits.recentTurns {
+            recentTurns.removeFirst(recentTurns.count - limits.recentTurns)
+        }
+        if outcomes.count > limits.outcomes {
+            outcomes.removeFirst(outcomes.count - limits.outcomes)
+        }
+        if relevantRecords.count > limits.relevantRecords {
+            relevantRecords.removeFirst(relevantRecords.count - limits.relevantRecords)
+        }
     }
 }
 

@@ -2,6 +2,30 @@ import Foundation
 import FoundationModels
 import OSLog
 
+struct AgentToolOutputPolicy: Sendable, Hashable {
+    var resultLimit: Int
+    var fieldCharacterLimit: Int
+    var noteCharacterLimit: Int
+    var tagLimit: Int
+    var relatedRecordLimit: Int
+
+    nonisolated static let appleFoundationModels = AgentToolOutputPolicy(
+        resultLimit: 5,
+        fieldCharacterLimit: 80,
+        noteCharacterLimit: 160,
+        tagLimit: 3,
+        relatedRecordLimit: 3
+    )
+
+    nonisolated static let openAI = AgentToolOutputPolicy(
+        resultLimit: 12,
+        fieldCharacterLimit: 180,
+        noteCharacterLimit: 500,
+        tagLimit: 8,
+        relatedRecordLimit: 8
+    )
+}
+
 @Generable(description: "Arguments for looking up contacts in the local CRM.")
 struct FindContactsArguments: Sendable {
     @Guide(description: "Short name, company, or keyword.")
@@ -46,6 +70,7 @@ struct AgentTurnTimeout: Error {}
 
 struct FindContactsTool: Tool {
     let dataSource: AgentToolDataSource
+    var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
     var name: String { "findContacts" }
     var description: String {
@@ -60,14 +85,15 @@ struct FindContactsTool: Tool {
             return ToolText.emptyQuery
         }
 
-        let matches = try await dataSource.contacts(arguments.query, ToolText.resultLimit)
+        let matches = try await dataSource.contacts(arguments.query, outputPolicy.resultLimit)
         AppLog.tools.debug("findContacts query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
-        return ToolText.contacts(matches)
+        return ToolText.contacts(matches, policy: outputPolicy)
     }
 }
 
 struct FindOpportunitiesTool: Tool {
     let dataSource: AgentToolDataSource
+    var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
     var name: String { "findOpportunities" }
     var description: String {
@@ -82,9 +108,9 @@ struct FindOpportunitiesTool: Tool {
             return ToolText.emptyQuery
         }
 
-        let matches = try await dataSource.opportunities(arguments.query, ToolText.resultLimit)
+        let matches = try await dataSource.opportunities(arguments.query, outputPolicy.resultLimit)
         AppLog.tools.debug("findOpportunities query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
-        return ToolText.opportunities(matches)
+        return ToolText.opportunities(matches, policy: outputPolicy)
     }
 }
 
@@ -100,6 +126,7 @@ struct ContactDetailsArguments: Sendable {
 
 struct GetContactDetailsTool: Tool {
     let dataSource: AgentToolDataSource
+    var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
     var name: String { "getContactDetails" }
     var description: String {
@@ -116,7 +143,7 @@ struct GetContactDetailsTool: Tool {
 
         let snapshot = try await dataSource.snapshot()
         AppLog.tools.debug("getContactDetails query=\(arguments.query, privacy: .private)")
-        return ToolText.contactDetails(snapshot, query: arguments.query)
+        return ToolText.contactDetails(snapshot, query: arguments.query, policy: outputPolicy)
     }
 }
 
@@ -128,6 +155,7 @@ struct PipelineSummaryArguments: Sendable {
 
 struct GetPipelineSummaryTool: Tool {
     let dataSource: AgentToolDataSource
+    var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
     var name: String { "getPipelineSummary" }
     var description: String {
@@ -138,12 +166,13 @@ struct GetPipelineSummaryTool: Tool {
     func call(arguments: PipelineSummaryArguments) async throws -> String {
         let snapshot = try await dataSource.snapshot()
         AppLog.tools.debug("getPipelineSummary focus=\(arguments.focus ?? "-", privacy: .public) contacts=\(snapshot.contacts.count, privacy: .public) opportunities=\(snapshot.opportunities.count, privacy: .public) followUps=\(snapshot.followUps.count, privacy: .public)")
-        return ToolText.pipelineSummary(snapshot, focus: arguments.focus)
+        return ToolText.pipelineSummary(snapshot, focus: arguments.focus, policy: outputPolicy)
     }
 }
 
 struct FindFollowUpsTool: Tool {
     let dataSource: AgentToolDataSource
+    var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
     var name: String { "findFollowUps" }
     var description: String {
@@ -158,43 +187,42 @@ struct FindFollowUpsTool: Tool {
             return ToolText.emptyQuery
         }
 
-        let matches = try await dataSource.followUps(arguments.query, ToolText.resultLimit)
+        let matches = try await dataSource.followUps(arguments.query, outputPolicy.resultLimit)
         AppLog.tools.debug("findFollowUps query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
-        return ToolText.followUps(matches)
+        return ToolText.followUps(matches, policy: outputPolicy)
     }
 }
 
 enum ToolText {
-    nonisolated static var resultLimit: Int { 5 }
     nonisolated static var emptyQuery: String { "No query supplied. Ask for a specific name, company, opportunity, or follow-up." }
     private nonisolated static var noMatches: String { "No matching local records." }
 
-    nonisolated static func contacts(_ contacts: [CRMContactSnapshot]) -> String {
+    nonisolated static func contacts(_ contacts: [CRMContactSnapshot], policy: AgentToolOutputPolicy) -> String {
         guard !contacts.isEmpty else { return noMatches }
         return contacts.map {
-            "contact id=\($0.id) name=\($0.fullName.compactToolValue) company=\($0.company.compactToolValue) role=\($0.role.compactToolValue) email=\($0.email.compactToolValue) phone=\($0.phone.compactToolValue) tags=\($0.tags.toolList)"
+            "contact id=\($0.id) name=\(compactToolValue($0.fullName, limit: policy.fieldCharacterLimit)) company=\(compactToolValue($0.company, limit: policy.fieldCharacterLimit)) role=\(compactToolValue($0.role, limit: policy.fieldCharacterLimit)) email=\(compactToolValue($0.email, limit: policy.fieldCharacterLimit)) phone=\(compactToolValue($0.phone, limit: policy.fieldCharacterLimit)) tags=\(toolList($0.tags, policy: policy))"
         }
         .joined(separator: "\n")
     }
 
-    nonisolated static func opportunities(_ opportunities: [CRMOpportunitySnapshot]) -> String {
+    nonisolated static func opportunities(_ opportunities: [CRMOpportunitySnapshot], policy: AgentToolOutputPolicy) -> String {
         guard !opportunities.isEmpty else { return noMatches }
         return opportunities.map {
-            let value = $0.estimatedValueEUR.map { String($0) } ?? $0.budgetText.compactToolValue
-            return "opportunity id=\($0.id) title=\($0.title.compactToolValue) company=\($0.company.compactToolValue) stage=\($0.stage) value=\(value) tags=\($0.tags.toolList)"
+            let value = $0.estimatedValueEUR.map { String($0) } ?? compactToolValue($0.budgetText, limit: policy.fieldCharacterLimit)
+            return "opportunity id=\($0.id) title=\(compactToolValue($0.title, limit: policy.fieldCharacterLimit)) company=\(compactToolValue($0.company, limit: policy.fieldCharacterLimit)) stage=\($0.stage) value=\(value) tags=\(toolList($0.tags, policy: policy))"
         }
         .joined(separator: "\n")
     }
 
-    nonisolated static func followUps(_ followUps: [CRMFollowUpSnapshot]) -> String {
+    nonisolated static func followUps(_ followUps: [CRMFollowUpSnapshot], policy: AgentToolOutputPolicy) -> String {
         guard !followUps.isEmpty else { return noMatches }
         return followUps.map {
-            "followUp id=\($0.id) title=\($0.title.compactToolValue) due=\($0.dueDateText.compactToolValue) state=\($0.state) notes=\($0.notes.compactToolValue)"
+            "followUp id=\($0.id) title=\(compactToolValue($0.title, limit: policy.fieldCharacterLimit)) due=\(compactToolValue($0.dueDateText, limit: policy.fieldCharacterLimit)) state=\($0.state) notes=\(compactToolValue($0.notes, limit: policy.noteCharacterLimit))"
         }
         .joined(separator: "\n")
     }
 
-    nonisolated static func contactDetails(_ snapshot: CRMDataSnapshot, query: String) -> String {
+    nonisolated static func contactDetails(_ snapshot: CRMDataSnapshot, query: String, policy: AgentToolOutputPolicy) -> String {
         let key = query.searchKey
         let matches = snapshot.contacts.filter {
             $0.fullName.searchKey.contains(key) ||
@@ -204,28 +232,28 @@ enum ToolText {
 
         guard let contact = matches.first else { return noMatches }
         guard matches.count == 1 else {
-            return "Multiple contacts match. Ask which one:\n" + contacts(Array(matches.prefix(resultLimit)))
+            return "Multiple contacts match. Ask which one:\n" + contacts(Array(matches.prefix(policy.resultLimit)), policy: policy)
         }
 
-        var lines = [contacts([contact])]
+        var lines = [contacts([contact], policy: policy)]
         if let notes = contact.notes.nilIfBlank {
-            lines.append("notes=\(String(notes.prefix(160)))")
+            lines.append("notes=\(compactToolValue(notes, limit: policy.noteCharacterLimit))")
         }
 
         let related = snapshot.opportunities.filter { $0.contactID == contact.id }
         if !related.isEmpty {
-            lines.append(opportunities(Array(related.prefix(3))))
+            lines.append(opportunities(Array(related.prefix(policy.relatedRecordLimit)), policy: policy))
         }
 
         let open = snapshot.followUps.filter { $0.contactID == contact.id && $0.state == FollowUpState.open.rawValue }
         if !open.isEmpty {
-            lines.append(followUps(Array(open.prefix(3))))
+            lines.append(followUps(Array(open.prefix(policy.relatedRecordLimit)), policy: policy))
         }
 
         return lines.joined(separator: "\n")
     }
 
-    nonisolated static func pipelineSummary(_ snapshot: CRMDataSnapshot, focus: String?) -> String {
+    nonisolated static func pipelineSummary(_ snapshot: CRMDataSnapshot, focus: String?, policy: AgentToolOutputPolicy) -> String {
         let focusKey = focus?.searchKey ?? ""
         let wantsContacts = focusKey.isEmpty || focusKey.contains("contact")
         let wantsOpportunities = focusKey.isEmpty || focusKey.contains("opportun")
@@ -253,27 +281,26 @@ enum ToolText {
                 lines.append("open followUps none")
             } else {
                 lines.append("open followUps total=\(open.count)")
-                for followUp in open.prefix(resultLimit) {
-                    lines.append("followUp id=\(followUp.id) title=\(followUp.title.compactToolValue) due=\(followUp.dueDateText.compactToolValue)")
+                for followUp in open.prefix(policy.resultLimit) {
+                    lines.append("followUp id=\(followUp.id) title=\(compactToolValue(followUp.title, limit: policy.fieldCharacterLimit)) due=\(compactToolValue(followUp.dueDateText, limit: policy.fieldCharacterLimit))")
                 }
             }
         }
 
         return lines.isEmpty ? "No local CRM data yet." : lines.joined(separator: "\n")
     }
-}
 
-private extension String {
-    nonisolated var compactToolValue: String {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count > 80 else { return trimmed }
-        return "\(trimmed.prefix(77))..."
+    private nonisolated static func compactToolValue(_ value: String, limit: Int) -> String {
+        guard limit > 3 else { return String(value.prefix(max(0, limit))) }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > limit else { return trimmed }
+        return "\(trimmed.prefix(limit - 3))..."
     }
-}
 
-private extension Array where Element == String {
-    nonisolated var toolList: String {
-        let values = prefix(3).map(\.compactToolValue)
+    private nonisolated static func toolList(_ tags: [String], policy: AgentToolOutputPolicy) -> String {
+        let values = tags.prefix(policy.tagLimit).map {
+            compactToolValue($0, limit: policy.fieldCharacterLimit)
+        }
         if values.isEmpty {
             return "-"
         }

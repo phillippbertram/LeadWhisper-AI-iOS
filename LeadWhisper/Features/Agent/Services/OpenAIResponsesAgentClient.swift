@@ -73,7 +73,11 @@ final class OpenAIResponsesAgentClient: AgentModelClient {
             throw OpenAIClientError.missingAPIKey
         }
 
-        let toolDefinitions = AgentToolDefinitions.definitions(for: request.toolScope, dataSource: request.dataSource)
+        let toolDefinitions = AgentToolDefinitions.definitions(
+            for: request.toolScope,
+            dataSource: request.dataSource,
+            outputPolicy: request.toolOutputPolicy
+        )
         let toolsByName = Dictionary(uniqueKeysWithValues: toolDefinitions.map { ($0.name, $0) })
         var input: [JSONValue] = [
             .object([

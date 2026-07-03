@@ -61,6 +61,7 @@ struct AgentModelTurnRequest {
     var responseTokenLimit: Int
     var maxToolCalls: Int
     var dataSource: AgentToolDataSource
+    var toolOutputPolicy: AgentToolOutputPolicy
 }
 
 struct AgentModelPlanRequest {
@@ -81,6 +82,7 @@ struct AgentModelContextRequest {
     var dataSource: AgentToolDataSource
     var memoryPrompt: String?
     var responseReserveTokens: Int
+    var toolOutputPolicy: AgentToolOutputPolicy
 }
 
 @MainActor
