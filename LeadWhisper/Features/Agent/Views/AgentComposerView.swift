@@ -975,12 +975,46 @@ private struct ReceiptRecordRow: View {
     }
 }
 
-private struct AgentAvatar: View {
-    let systemImage: String
-    var isWorking = false
-    var accessibilityReduceMotion = false
+private enum AgentBeamMode {
+    case idle
+    case recording
+    case processing
 
-    private var beamConfiguration: BeamBorderConfiguration {
+    var isActive: Bool {
+        switch self {
+        case .idle:
+            false
+        case .recording, .processing:
+            true
+        }
+    }
+
+    var reducedMotionBorder: Color {
+        switch self {
+        case .idle:
+            .blue.opacity(0.42)
+        case .recording:
+            .red.opacity(0.48)
+        case .processing:
+            .cyan.opacity(0.44)
+        }
+    }
+
+    var inputConfiguration: BeamBorderConfiguration {
+        BeamBorderConfiguration(
+            border: inputBorder,
+            showsBaseBorder: true,
+            beamColors: inputBeamColors,
+            beamDirection: .both,
+            beamBlur: inputBeamBlur,
+            cornerRadius: 24,
+            borderLineWidth: inputBorderLineWidth,
+            baseBorderLineWidth: 0.8,
+            animationDuration: inputAnimationDuration
+        )
+    }
+
+    var avatarConfiguration: BeamBorderConfiguration {
         BeamBorderConfiguration(
             border: .blue.opacity(0.38),
             showsBaseBorder: true,
@@ -992,6 +1026,67 @@ private struct AgentAvatar: View {
             baseBorderLineWidth: 0.6,
             animationDuration: 3.6
         )
+    }
+
+    private var inputBorder: Color {
+        switch self {
+        case .idle:
+            .blue.opacity(0.72)
+        case .recording:
+            .red.opacity(0.9)
+        case .processing:
+            .blue.opacity(0.95)
+        }
+    }
+
+    private var inputBeamColors: [Color] {
+        switch self {
+        case .idle, .processing:
+            [.cyan, .blue, .green]
+        case .recording:
+            [.pink.opacity(0.96), .red.opacity(0.92), .orange.opacity(0.9)]
+        }
+    }
+
+    private var inputBeamBlur: CGFloat {
+        switch self {
+        case .idle:
+            12
+        case .recording:
+            16
+        case .processing:
+            18
+        }
+    }
+
+    private var inputBorderLineWidth: CGFloat {
+        switch self {
+        case .idle:
+            0.7
+        case .recording, .processing:
+            1.0
+        }
+    }
+
+    private var inputAnimationDuration: Double {
+        switch self {
+        case .idle:
+            3.2
+        case .recording:
+            2.4
+        case .processing:
+            1.8
+        }
+    }
+}
+
+private struct AgentAvatar: View {
+    let systemImage: String
+    var isWorking = false
+    var accessibilityReduceMotion = false
+
+    private var beamConfiguration: BeamBorderConfiguration {
+        AgentBeamMode.processing.avatarConfiguration
     }
 
     var body: some View {
@@ -1008,7 +1103,7 @@ private struct AgentAvatar: View {
             .overlay {
                 if isWorking && accessibilityReduceMotion {
                     Circle()
-                        .stroke(.blue.opacity(0.32), lineWidth: 1)
+                        .stroke(AgentBeamMode.processing.reducedMotionBorder, lineWidth: 1)
                         .padding(1)
                 }
             }
@@ -1068,7 +1163,6 @@ private struct ProcessingBubble: View {
                 isWorking: true,
                 accessibilityReduceMotion: accessibilityReduceMotion
             )
-            .beamBorder(.init(beamDirection: .outward, animationDuration: 1))
             Text(friendlyActivity)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -1265,18 +1359,25 @@ private struct AgentInputBar: View {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isProcessing
     }
 
+    private var beamMode: AgentBeamMode {
+        if isProcessing {
+            return .processing
+        }
+        if isRecording {
+            return .recording
+        }
+        return .idle
+    }
+
     private var beamConfiguration: BeamBorderConfiguration {
-        BeamBorderConfiguration(
-            border: .blue.opacity(isProcessing ? 0.95 : 0.72),
-            showsBaseBorder: true,
-            beamColors: [.cyan, .blue, .green],
-            beamDirection: .both,
-            beamBlur: isProcessing ? 18 : 12,
-            cornerRadius: 24,
-            borderLineWidth: isProcessing ? 1.0 : 0.7,
-            baseBorderLineWidth: 0.8,
-            animationDuration: isProcessing ? 1.0 : 2.6
-        )
+        beamMode.inputConfiguration
+    }
+
+    private var staticBorderColor: Color {
+        if accessibilityReduceMotion {
+            return beamMode.reducedMotionBorder
+        }
+        return .blue.opacity(0.16)
     }
 
     var body: some View {
@@ -1333,10 +1434,10 @@ private struct AgentInputBar: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(.blue.opacity(accessibilityReduceMotion ? 0.42 : 0.16), lineWidth: accessibilityReduceMotion ? 1.2 : 0.7)
+                .stroke(staticBorderColor, lineWidth: accessibilityReduceMotion ? 1.2 : 0.7)
         }
         .shadow(color: .black.opacity(0.08), radius: 18, x: 0, y: 8)
-        .beamBorder(beamConfiguration, isEnabled: (isRecording || isProcessing) && !accessibilityReduceMotion)
+        .beamBorder(beamConfiguration, isEnabled: beamMode.isActive && !accessibilityReduceMotion)
         .animation(.snappy(duration: 0.18), value: contextEvent?.id)
     }
 
