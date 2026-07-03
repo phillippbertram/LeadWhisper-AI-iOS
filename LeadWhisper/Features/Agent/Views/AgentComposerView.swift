@@ -63,7 +63,10 @@ struct AgentComposerView: View {
                     }
 
                     if isProcessing {
-                        ProcessingBubble(activity: engine.currentActivity)
+                        ProcessingBubble(
+                            activity: engine.currentActivity,
+                            accessibilityReduceMotion: accessibilityReduceMotion
+                        )
                             .id("processing")
                     }
 
@@ -972,6 +975,22 @@ private struct ReceiptRecordRow: View {
 
 private struct AgentAvatar: View {
     let systemImage: String
+    var isWorking = false
+    var accessibilityReduceMotion = false
+
+    private var beamConfiguration: BeamBorderConfiguration {
+        BeamBorderConfiguration(
+            border: .blue.opacity(0.38),
+            showsBaseBorder: true,
+            beamColors: [.cyan.opacity(0.9), .blue.opacity(0.78), .green.opacity(0.82)],
+            beamDirection: .both,
+            beamBlur: 7,
+            cornerRadius: 17,
+            borderLineWidth: 0.65,
+            baseBorderLineWidth: 0.6,
+            animationDuration: 3.6
+        )
+    }
 
     var body: some View {
         Image(systemName: systemImage)
@@ -983,6 +1002,15 @@ private struct AgentAvatar: View {
                 in: Circle()
             )
             .shadow(color: .blue.opacity(0.18), radius: 8, x: 0, y: 4)
+            .padding(isWorking ? 2 : 0)
+            .overlay {
+                if isWorking && accessibilityReduceMotion {
+                    Circle()
+                        .stroke(.blue.opacity(0.32), lineWidth: 1)
+                        .padding(1)
+                }
+            }
+            .beamBorder(beamConfiguration, isEnabled: isWorking && !accessibilityReduceMotion)
     }
 }
 
@@ -1029,46 +1057,55 @@ private extension ActivityEntityKind {
 
 private struct ProcessingBubble: View {
     var activity: String?
+    let accessibilityReduceMotion: Bool
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            AgentAvatar(systemImage: "brain")
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(friendlyActivity)
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                TypingDots()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .accessibilityLabel("LeadWhisper is thinking")
-            .accessibilityValue(friendlyActivity)
+            AgentAvatar(
+                systemImage: "brain",
+                isWorking: true,
+                accessibilityReduceMotion: accessibilityReduceMotion
+            )
+            .beamBorder(.init(beamDirection: .outward, animationDuration: 1))
+            Text(friendlyActivity)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(.blue.opacity(0.12), lineWidth: 0.7)
+                }
             Spacer(minLength: 36)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("LeadWhisper is working")
+        .accessibilityValue(friendlyActivity)
     }
 
     private var friendlyActivity: String {
         guard let activity = activity?.nilIfBlank else {
-            return "Preparing a review draft..."
+            return "Working on it"
         }
 
         if activity.hasPrefix("findContacts") {
-            return "Checking matching contacts..."
+            return "Checking contacts"
         }
         if activity.hasPrefix("findOpportunities") {
-            return "Checking pipeline..."
+            return "Checking pipeline"
         }
         if activity.hasPrefix("findFollowUps") {
-            return "Checking follow-ups..."
+            return "Checking follow-ups"
+        }
+        if activity.hasPrefix("getContactDetails") {
+            return "Reading contact context"
         }
         if activity.hasPrefix("getPipelineSummary") {
-            return "Reading your CRM summary..."
+            return "Reading CRM summary"
         }
-        return "Preparing a review draft..."
+        return "Working on it"
     }
 }
 
@@ -1109,19 +1146,6 @@ private struct AgentPrivacyPopover: View {
         case .openAI:
             "Agent messages and local CRM lookup results are sent to OpenAI. Proposed changes are still only saved after you review them."
         }
-    }
-}
-
-private struct TypingDots: View {
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { _ in
-                Circle()
-                    .fill(.secondary)
-                    .frame(width: 5, height: 5)
-            }
-        }
-        .accessibilityHidden(true)
     }
 }
 
