@@ -989,7 +989,7 @@ private struct ReceiptRecordRow: View {
     }
 }
 
-private enum AgentBeamMode {
+private enum AgentBeamMode: Hashable {
     case idle
     case recording
     case processing
@@ -1011,6 +1011,17 @@ private enum AgentBeamMode {
             .red.opacity(0.48)
         case .processing:
             .cyan.opacity(0.44)
+        }
+    }
+
+    var overlayBorder: Color {
+        switch self {
+        case .idle:
+            .blue.opacity(0.16)
+        case .recording:
+            .red.opacity(0.34)
+        case .processing:
+            .cyan.opacity(0.26)
         }
     }
 
@@ -1391,7 +1402,7 @@ private struct AgentInputBar: View {
         if accessibilityReduceMotion {
             return beamMode.reducedMotionBorder
         }
-        return .blue.opacity(0.16)
+        return beamMode.overlayBorder
     }
 
     var body: some View {
@@ -1452,6 +1463,7 @@ private struct AgentInputBar: View {
         }
         .shadow(color: .black.opacity(0.08), radius: 18, x: 0, y: 8)
         .beamBorder(beamConfiguration, isEnabled: beamMode.isActive && !accessibilityReduceMotion)
+        .id(beamMode)
         .animation(.snappy(duration: 0.18), value: contextEvent?.id)
     }
 
