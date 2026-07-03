@@ -1,6 +1,8 @@
 # LeadWhisper
 
-LeadWhisper is a Swift-native agent showcase for iPhone CRM workflows. After a call, meeting, or quick thought, you can speak or type what happened. LeadWhisper extracts contacts, opportunities, follow-ups, notes, stages, and activity history, then proposes CRM changes you can approve or discard.
+LeadWhisper is an agentic-AI centric CRM showcase for iPhone. The app is built around an internal Swift-native agent that can drive the CRM experience end to end: capture updates, look up local records, answer pipeline questions, draft CRM mutations, and hand every proposed change back to the user for review.
+
+The classic Today, Contacts, Opportunities, and Settings surfaces are still available, but they are not the main idea. The intended interaction model is agent-first: after a call, meeting, or quick thought, you can speak or type what happened and let the internal agent turn that context into reviewed CRM work.
 
 The project started as a private-first, on-device CRM companion. In practice, the current Foundation Models limits make that path too constrained for this agent showcase. The practical path now uses OpenAI for model reasoning while keeping CRM storage, local tools, and review-before-save behavior in the Swift app.
 
@@ -23,9 +25,12 @@ So the showcase moved up a layer. The interesting question is no longer "can Fou
 ## Screenshots
 
 <p align="center">
-  <img src="Screenshots/leadwhisper-agentview.gif" alt="LeadWhisper AgentView interaction" width="240">
+  <img src="Screenshots/leadwhisper-agentview.gif" alt="LeadWhisper AgentView interaction" width="220">
+  <img src="Screenshots/leadwhisper-agent-review.gif" alt="LeadWhisper Agent review interaction" width="220">
   <br>
   <sub>AgentView interaction</sub>
+  &nbsp;&nbsp;
+  <sub>Review interaction</sub>
 </p>
 
 <table>
@@ -46,6 +51,12 @@ So the showcase moved up a layer. The interesting question is no longer "can Fou
 ### Swift-native agent harness
 
 LeadWhisper explores what it means to implement an agent natively in Swift instead of wrapping a Python or JavaScript agent runtime.
+
+### Agent-first app model
+
+The Agent tab is not a side feature bolted onto a conventional CRM. It is the center of the app. A user should be able to operate the CRM through the internal agent: create or update contacts, move opportunities, create notes and follow-ups, ask what is due, inspect pipeline state, and then approve or reject the generated local changes.
+
+The surrounding tabs make the local data visible and editable, but the showcase is the agentic workflow itself: natural-language input, local tool use, structured draft generation, and human approval.
 
 The model is not treated as a plain text generator. It acts as the decision point in an agent loop:
 
@@ -73,8 +84,10 @@ The product boundary is simple: the model proposes, SwiftData changes only after
 
 ## What It Does
 
+- Use the internal agent as the primary interface for CRM work.
 - Capture CRM updates by voice or text.
 - Review AI-generated drafts before any local data changes are applied.
+- Ask agentic questions about follow-ups, contacts, opportunities, and pipeline state.
 - Manage contacts, companies, notes, and tags.
 - Track opportunities by stage, expected start, budget, and related contact.
 - Keep follow-up tasks visible in a Today view.
@@ -112,7 +125,7 @@ Voice input uses Apple's Speech and AVFoundation APIs. On unsupported environmen
 
 ## Agent Architecture
 
-The Agent tab is a Swift-native provider-backed agent. The model, not a scripted workflow, decides each turn whether to answer, ask one follow-up question, call a local lookup tool, or propose reviewable CRM changes.
+The Agent tab is the app's primary workflow surface. It is a Swift-native provider-backed agent where the model, not a scripted workflow, decides each turn whether to answer, ask one follow-up question, call a local lookup tool, or propose reviewable CRM changes.
 
 ```mermaid
 flowchart TD
