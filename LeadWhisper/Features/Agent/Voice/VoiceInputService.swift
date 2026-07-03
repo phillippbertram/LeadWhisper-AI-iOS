@@ -379,7 +379,8 @@ private final class SpeechRecordingSession {
     private var analysisTask: Task<Void, Never>?
     private var conversionTask: Task<Void, Never>?
     private var resultTask: Task<Void, Never>?
-    private var transcriptionSegments: [TranscriptionSegment] = []
+    private var finalizedSegments: [TranscriptionSegment] = []
+    private var volatileText = ""
     private var hasInstalledTap = false
     private var hasFinished = false
 
@@ -515,20 +516,35 @@ private final class SpeechRecordingSession {
 
     private func applyTranscriptionResult(_ result: SpeechTranscriber.Result) {
         let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
 
-        if let index = transcriptionSegments.firstIndex(where: { $0.range == result.range }) {
-            transcriptionSegments[index].text = text
+        if result.isFinal {
+            // Final results are committed, non-overlapping chunks. The volatile
+            // hypotheses covered the same audio, so drop the transient tail.
+            volatileText = ""
+            if !text.isEmpty {
+                if let index = finalizedSegments.firstIndex(where: { $0.range == result.range }) {
+                    finalizedSegments[index].text = text
+                } else {
+                    finalizedSegments.append(TranscriptionSegment(range: result.range, text: text))
+                }
+                finalizedSegments.sort {
+                    CMTimeCompare($0.range.start, $1.range.start) < 0
+                }
+            }
         } else {
-            transcriptionSegments.append(TranscriptionSegment(range: result.range, text: text))
+            // Volatile results are progressive hypotheses over the tail of the
+            // audio; their range grows each update, so accumulating them by range
+            // duplicated the transcript. Keep only the latest as a transient tail.
+            volatileText = text
         }
 
-        transcriptionSegments.sort {
-            CMTimeCompare($0.range.start, $1.range.start) < 0
+        var parts = finalizedSegments.map(\.text)
+        if !volatileText.isEmpty {
+            parts.append(volatileText)
         }
-        let transcript = transcriptionSegments.map(\.text).joined(separator: " ")
+        let transcript = parts.joined(separator: " ")
         eventContinuation?.yield(.transcript(transcript))
-        AppLog.voice.debug("Speech transcription updated segments=\(self.transcriptionSegments.count, privacy: .public) characters=\(transcript.count, privacy: .public)")
+        AppLog.voice.debug("Speech transcription updated finalized=\(self.finalizedSegments.count, privacy: .public) volatile=\(self.volatileText.isEmpty ? 0 : 1, privacy: .public) characters=\(transcript.count, privacy: .public)")
     }
 
     private func finish(throwing error: Error?) {
