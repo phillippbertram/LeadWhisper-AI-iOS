@@ -6,6 +6,22 @@ import Observation
 import OSLog
 import Speech
 
+enum VoiceInputPhase: Equatable {
+    case idle
+    case starting
+    case recording
+    case transcribing
+
+    var logLabel: String {
+        switch self {
+        case .idle: "idle"
+        case .starting: "starting"
+        case .recording: "recording"
+        case .transcribing: "transcribing"
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class VoiceInputService {
@@ -13,36 +29,27 @@ final class VoiceInputService {
     nonisolated static let temporarilyDisabledMessage = "Voice input is temporarily disabled. Type the transcript instead."
     nonisolated static let unavailableMessage = "Voice recording unavailable here. Type the transcript instead."
 
-    private enum RecordingState: Equatable {
-        case idle
-        case starting
-        case recording
-
-        var logLabel: String {
-            switch self {
-            case .idle: "idle"
-            case .starting: "starting"
-            case .recording: "recording"
-            }
-        }
-    }
-
     var transcript = ""
     var statusMessage: String
     var recordingCapability: VoiceRecordingCapability
+    /// Smoothed microphone input level (0...1) while recording, for waveform UI.
+    private(set) var audioLevel: Float = 0
 
-    private var state: RecordingState = .idle
+    private(set) var phase: VoiceInputPhase = .idle
 
-    var isRecording: Bool { state == .recording }
+    var isRecording: Bool { phase == .recording }
+    var isTranscribing: Bool { phase == .transcribing }
 
     @ObservationIgnored
     private var recordingSession: SpeechRecordingSession?
     @ObservationIgnored
     private var eventTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var transcriptionWatchdog: Task<Void, Never>?
 
     /// True while any audio or recognition resources are live.
     private var hasActiveAudioWork: Bool {
-        state != .idle || recordingSession != nil || eventTask != nil
+        phase != .idle || recordingSession != nil || eventTask != nil
     }
 
     init(recordingCapability: VoiceRecordingCapability? = nil) {
@@ -56,33 +63,21 @@ final class VoiceInputService {
         recordingCapability.isSupported
     }
 
-    var recordButtonTitle: String {
-        if isRecording {
-            return "Stop"
-        }
-        return canRecordAudio ? "Start Recording" : "Voice Unavailable"
-    }
-
-    var recordButtonSystemImage: String {
-        if isRecording {
-            return "stop.circle.fill"
-        }
-        return canRecordAudio ? "mic.circle.fill" : "mic.slash.fill"
-    }
-
     func startRecording() async {
-        guard state == .idle else {
-            AppLog.voice.debug("Voice recording start ignored state=\(self.state.logLabel, privacy: .public)")
+        guard phase == .idle else {
+            AppLog.voice.debug("Voice recording start ignored phase=\(self.phase.logLabel, privacy: .public)")
             return
         }
-        state = .starting
+        phase = .starting
+        transcript = ""
+        audioLevel = 0
 
         // Any early exit below leaves the service idle again; only the success
         // path flips this to true and locks in the .recording state.
         var didStartRecording = false
         defer {
-            if !didStartRecording, state == .starting {
-                state = .idle
+            if !didStartRecording, phase == .starting {
+                phase = .idle
             }
         }
 
@@ -117,6 +112,13 @@ final class VoiceInputService {
             return
         }
 
+        // The permission awaits above suspend; the user may have cancelled in
+        // the meantime, so do not spin up audio resources for a dead session.
+        guard phase == .starting else {
+            AppLog.voice.debug("Voice recording start aborted during setup phase=\(self.phase.logLabel, privacy: .public)")
+            return
+        }
+
         do {
             let transcriber = try await makeTranscriber()
             try await prepareSpeechAssets(for: transcriber)
@@ -124,11 +126,19 @@ final class VoiceInputService {
             try validateAudioRoute()
             let session = SpeechRecordingSession(transcriber: transcriber)
             let events = try await session.start()
+            guard phase == .starting else {
+                AppLog.voice.debug("Voice recording cancelled during startup; discarding session")
+                Task {
+                    await session.stop()
+                    await Self.deactivateAudioSession()
+                }
+                return
+            }
             recordingSession = session
             eventTask = Task { [weak self] in
                 await self?.consumeRecordingEvents(events)
             }
-            state = .recording
+            phase = .recording
             didStartRecording = true
             statusMessage = "Listening..."
             AppLog.voice.info("Voice recording started")
@@ -138,20 +148,51 @@ final class VoiceInputService {
             if Self.isUnavailableAudioError(error) {
                 recordingCapability = .unavailable(statusMessage)
             }
-            stopRecording(finalStatus: statusMessage)
+            tearDownSession(finalStatus: statusMessage)
         }
     }
 
-    func stopRecording() {
-        stopRecording(finalStatus: nil)
+    /// Graceful stop: keeps the analyzer alive so trailing audio is finalized,
+    /// then completes through the normal event stream (`.finished`).
+    func finishRecording() {
+        guard phase == .recording, let recordingSession else {
+            cancelRecording()
+            return
+        }
+        phase = .transcribing
+        statusMessage = "Transcribing..."
+        audioLevel = 0
+        recordingSession.endAudioInput()
+        startTranscriptionWatchdog()
+        AppLog.voice.info("Voice recording finishing, awaiting final transcription")
     }
 
-    private func stopRecording(finalStatus: String?, cancelEventTask: Bool = true) {
+    /// Hard stop: discards pending finalization and tears everything down.
+    func cancelRecording() {
+        tearDownSession(finalStatus: nil)
+    }
+
+    /// A stuck finalization must never leave the UI in `.transcribing`.
+    private func startTranscriptionWatchdog() {
+        transcriptionWatchdog?.cancel()
+        transcriptionWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled, let self, self.phase == .transcribing else { return }
+            AppLog.voice.warning("Speech transcription finalization timed out; cancelling session")
+            self.tearDownSession(finalStatus: self.transcript.isEmpty ? "No speech detected." : "Transcript captured")
+        }
+    }
+
+    private func tearDownSession(finalStatus: String?, cancelEventTask: Bool = true) {
+        transcriptionWatchdog?.cancel()
+        transcriptionWatchdog = nil
+        audioLevel = 0
+
         guard hasActiveAudioWork else {
             if let finalStatus {
                 statusMessage = finalStatus
             }
-            state = .idle
+            phase = .idle
             return
         }
 
@@ -161,7 +202,7 @@ final class VoiceInputService {
             eventTask?.cancel()
         }
         eventTask = nil
-        state = .idle
+        phase = .idle
         statusMessage = finalStatus ?? (transcript.isEmpty ? recordingCapability.message : "Transcript captured")
         Task {
             await sessionToStop?.stop()
@@ -171,7 +212,7 @@ final class VoiceInputService {
     }
 
     func reset() {
-        stopRecording()
+        cancelRecording()
         transcript = ""
         statusMessage = recordingCapability.message
         AppLog.voice.debug("Voice transcript reset")
@@ -182,8 +223,8 @@ final class VoiceInputService {
             for try await event in events {
                 handle(event)
             }
-            if state == .recording {
-                stopRecording(finalStatus: transcript.isEmpty ? recordingCapability.message : "Transcript captured", cancelEventTask: false)
+            if phase == .recording || phase == .transcribing {
+                tearDownSession(finalStatus: completionStatus, cancelEventTask: false)
             }
         } catch is CancellationError {
             AppLog.voice.debug("Voice recording event task cancelled")
@@ -192,15 +233,25 @@ final class VoiceInputService {
         }
     }
 
+    private var completionStatus: String {
+        transcript.isEmpty ? "No speech detected." : "Transcript captured"
+    }
+
     private func handle(_ event: VoiceRecordingEvent) {
         switch event {
         case .status(let message):
-            statusMessage = message
+            if phase != .transcribing {
+                statusMessage = message
+            }
+        case .level(let level):
+            if phase == .recording || phase == .starting {
+                audioLevel = min(1, max(0, audioLevel * 0.35 + level * 0.65))
+            }
         case .transcript(let transcript):
             self.transcript = transcript
         case .finished:
-            if state == .recording {
-                stopRecording(finalStatus: transcript.isEmpty ? recordingCapability.message : "Transcript captured", cancelEventTask: false)
+            if phase == .recording || phase == .transcribing {
+                tearDownSession(finalStatus: completionStatus, cancelEventTask: false)
             }
         }
     }
@@ -212,7 +263,7 @@ final class VoiceInputService {
         if Self.isUnavailableAudioError(error) {
             recordingCapability = .unavailable(message)
         }
-        stopRecording(finalStatus: message, cancelEventTask: false)
+        tearDownSession(finalStatus: message, cancelEventTask: false)
     }
 
     func refreshRecordingCapability() {
@@ -361,6 +412,7 @@ final class VoiceInputService {
 
 private enum VoiceRecordingEvent: Sendable {
     case status(String)
+    case level(Float)
     case transcript(String)
     case finished
 }
@@ -444,6 +496,22 @@ private final class SpeechRecordingSession {
         await analyzer.cancelAndFinishNow()
     }
 
+    /// Stops capturing audio but leaves the analyzer pipeline running so it can
+    /// finalize the remaining input; completion arrives as a `.finished` event.
+    func endAudioInput() {
+        guard !hasFinished else { return }
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        if hasInstalledTap {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            hasInstalledTap = false
+        }
+        rawBufferContinuation?.finish()
+        rawBufferContinuation = nil
+        AppLog.voice.debug("Audio input ended, awaiting transcription finalization")
+    }
+
     private func startResultTask() {
         resultTask = Task { [weak self, transcriber] in
             do {
@@ -487,14 +555,34 @@ private final class SpeechRecordingSession {
         analyzerFormat: AVAudioFormat,
         continuation: AsyncStream<AnalyzerInput>.Continuation
     ) {
-        conversionTask = Task {
+        conversionTask = Task { [weak self] in
             let converter = PCMBufferConverter(outputFormat: analyzerFormat)
             for await rawInput in buffers {
+                if let level = Self.inputLevel(of: rawInput.buffer) {
+                    self?.eventContinuation?.yield(.level(level))
+                }
                 guard let converted = converter.convert(rawInput.buffer) else { continue }
                 continuation.yield(AnalyzerInput(buffer: converted))
             }
             continuation.finish()
         }
+    }
+
+    /// Perceptual (log-scaled) mic level in 0...1 for the recording waveform.
+    private nonisolated static func inputLevel(of buffer: AVAudioPCMBuffer) -> Float? {
+        guard let channelData = buffer.floatChannelData, buffer.frameLength > 0 else { return nil }
+        let samples = channelData[0]
+        let frameLength = Int(buffer.frameLength)
+        var sum: Float = 0
+        for index in 0..<frameLength {
+            let sample = samples[index]
+            sum += sample * sample
+        }
+        let rms = sqrt(sum / Float(frameLength))
+        guard rms.isFinite else { return nil }
+        let decibels = 20 * log10(max(rms, .leastNormalMagnitude))
+        // Map roughly -50 dB (quiet room) ... 0 dB (full scale) onto 0...1.
+        return min(max((decibels + 50) / 50, 0), 1)
     }
 
     private func installTap(

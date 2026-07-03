@@ -21,7 +21,6 @@ struct AgentComposerView: View {
     @State private var engine = Container.shared.agentConversationEngine()
     @State private var draftText = ""
     @State private var activeTranscript = ""
-    @State private var isVoiceSession = false
     @State private var analyzeTask: Task<Void, Never>?
     @State private var messages: [AgentConversationMessage] = []
     @State private var suggestions: [AgentSuggestion] = []
@@ -107,7 +106,8 @@ struct AgentComposerView: View {
                         text: $draftText,
                         isInputFocused: $isInputFocused,
                         placeholder: inputPlaceholder,
-                        isRecording: voiceInput.isRecording,
+                        voicePhase: voiceInput.phase,
+                        audioLevel: voiceInput.audioLevel,
                         canRecord: voiceInput.canRecordAudio,
                         statusMessage: voiceInput.statusMessage,
                         isProcessing: isProcessing,
@@ -116,7 +116,7 @@ struct AgentComposerView: View {
                         contextEvent: engine.contextWindowEvent,
                         providerStatusMessage: providerStatusMessage,
                         send: { submitDraftText() },
-                        toggleRecording: toggleRecording
+                        voiceAction: handleVoiceAction
                     )
                 }
                 .padding(.horizontal, 12)
@@ -197,9 +197,10 @@ struct AgentComposerView: View {
         .task {
             engine.prewarm()
         }
-        .onChange(of: voiceInput.transcript) { _, newValue in
-            guard isVoiceSession else { return }
-            draftText = newValue
+        .onChange(of: voiceInput.phase) { oldValue, newValue in
+            guard oldValue == .transcribing, newValue == .idle,
+                  let transcript = voiceInput.transcript.nilIfBlank else { return }
+            insertTranscript(transcript)
         }
         .onDisappear {
             resetEntryAnimation()
@@ -380,13 +381,12 @@ struct AgentComposerView: View {
         let activeReview = activeReviewResult
         HapticFeedback.play(.lightImpact)
 
-        if voiceInput.isRecording {
-            voiceInput.stopRecording()
+        if voiceInput.phase != .idle {
+            voiceInput.cancelRecording()
         }
 
         draftText = ""
         dismissKeyboard()
-        isVoiceSession = false
         if activeReview == nil {
             activeResultID = nil
         }
@@ -533,21 +533,35 @@ struct AgentComposerView: View {
         .joined(separator: "\n")
     }
 
-    private func toggleRecording() {
-        Task {
-            if voiceInput.isRecording {
-                voiceInput.stopRecording()
-                HapticFeedback.play(.lightImpact)
-            } else {
-                isVoiceSession = true
+    private func handleVoiceAction() {
+        switch voiceInput.phase {
+        case .idle:
+            dismissKeyboard()
+            Task {
                 await voiceInput.startRecording()
                 if voiceInput.isRecording {
                     HapticFeedback.play(.mediumImpact)
-                } else {
-                    isVoiceSession = false
                 }
             }
+        case .recording:
+            voiceInput.finishRecording()
+            HapticFeedback.play(.lightImpact)
+        case .starting:
+            voiceInput.cancelRecording()
+        case .transcribing:
+            break
         }
+    }
+
+    private func insertTranscript(_ transcript: String) {
+        if accessibilityReduceMotion {
+            draftText = transcript
+        } else {
+            withAnimation(.smooth(duration: 0.35)) {
+                draftText = transcript
+            }
+        }
+        isInputFocused = true
     }
 
     private func resetConversation() {
@@ -556,7 +570,6 @@ struct AgentComposerView: View {
         engine.reset()
         draftText = ""
         activeTranscript = ""
-        isVoiceSession = false
         dismissKeyboard()
         isProcessing = false
         activeResultID = nil
@@ -1369,7 +1382,8 @@ private struct AgentInputBar: View {
     @Binding var text: String
     let isInputFocused: FocusState<Bool>.Binding
     let placeholder: String
-    let isRecording: Bool
+    let voicePhase: VoiceInputPhase
+    let audioLevel: Float
     let canRecord: Bool
     let statusMessage: String
     let isProcessing: Bool
@@ -1378,20 +1392,34 @@ private struct AgentInputBar: View {
     let contextEvent: AgentContextWindowEvent?
     let providerStatusMessage: String
     let send: () -> Void
-    let toggleRecording: () -> Void
+    let voiceAction: () -> Void
+
+    @State private var revealBlur: CGFloat = 0
+
+    private var hasText: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     private var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isProcessing
+        hasText && !isProcessing
+    }
+
+    private var isVoiceActive: Bool {
+        voicePhase != .idle
     }
 
     private var beamMode: AgentBeamMode {
         if isProcessing {
             return .processing
         }
-        if isRecording {
+        switch voicePhase {
+        case .starting, .recording:
             return .recording
+        case .transcribing:
+            return .processing
+        case .idle:
+            return .idle
         }
-        return .idle
     }
 
     private var beamConfiguration: BeamBorderConfiguration {
@@ -1405,31 +1433,40 @@ private struct AgentInputBar: View {
         return beamMode.overlayBorder
     }
 
+    private var actionState: ComposerActionState {
+        switch voicePhase {
+        case .starting, .recording:
+            return .stop
+        case .transcribing:
+            return .progress
+        case .idle:
+            if hasText {
+                return .send
+            }
+            return canRecord ? .mic : .micUnavailable
+        }
+    }
+
+    private var actionIsEnabled: Bool {
+        switch actionState {
+        case .mic, .stop:
+            true
+        case .send:
+            canSend
+        case .micUnavailable, .progress:
+            false
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            TextField(placeholder, text: $text, axis: .vertical)
-                .focused(isInputFocused)
-                .font(.body)
-                .lineLimit(1...5)
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 13)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            inputSurface
 
             HStack(alignment: .center, spacing: 8) {
-                ComposerIconButton(
-                    systemImage: isRecording ? "stop.fill" : canRecord ? "mic.fill" : "mic.slash.fill",
-                    tint: isRecording ? .red : canRecord ? .blue : .secondary,
-                    isEnabled: canRecord || isRecording,
-                    accessibilityLabel: isRecording ? "Stop recording" : canRecord ? "Start recording" : "Voice input unavailable",
-                    action: toggleRecording
-                )
-
                 HStack(spacing: 6) {
-                    Image(systemName: isProcessing ? "brain" : isRecording ? "waveform" : "lock.shield")
+                    Image(systemName: isProcessing ? "brain" : isVoiceActive ? "waveform" : "lock.shield")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(isProcessing || isRecording ? .white : .secondary)
+                        .foregroundStyle(isProcessing || isVoiceActive ? .white : .secondary)
                     Text(statusLine)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -1446,12 +1483,11 @@ private struct AgentInputBar: View {
                         .layoutPriority(2)
                 }
                 ContextWindowUsageRing(usage: contextUsage)
-                ComposerIconButton(
-                    systemImage: "arrow.up",
-                    tint: .blue,
-                    isEnabled: canSend,
-                    accessibilityLabel: "Send to LeadWhisper",
-                    action: send
+                ComposerActionButton(
+                    state: actionState,
+                    isEnabled: actionIsEnabled,
+                    accessibilityReduceMotion: accessibilityReduceMotion,
+                    action: actionState == .send ? send : voiceAction
                 )
             }
         }
@@ -1465,16 +1501,226 @@ private struct AgentInputBar: View {
         .beamBorder(beamConfiguration, isEnabled: beamMode.isActive && !accessibilityReduceMotion)
         .id(beamMode)
         .animation(.snappy(duration: 0.18), value: contextEvent?.id)
+        .animation(stateAnimation(.smooth(duration: 0.3)), value: voicePhase)
+        .animation(stateAnimation(.snappy(duration: 0.2)), value: hasText)
+        .onChange(of: voicePhase) { oldValue, newValue in
+            guard oldValue == .transcribing, newValue == .idle, !accessibilityReduceMotion else { return }
+            revealBlur = 5
+            withAnimation(.easeOut(duration: 0.45)) {
+                revealBlur = 0
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var inputSurface: some View {
+        ZStack(alignment: .leading) {
+            if isVoiceActive {
+                VoiceRecordingSurface(
+                    phase: voicePhase,
+                    audioLevel: audioLevel,
+                    reduceMotion: accessibilityReduceMotion
+                )
+                .transition(surfaceTransition)
+            } else {
+                TextField(placeholder, text: $text, axis: .vertical)
+                    .focused(isInputFocused)
+                    .font(.body)
+                    .lineLimit(1...5)
+                    .textFieldStyle(.plain)
+                    .blur(radius: revealBlur)
+                    .transition(surfaceTransition)
+            }
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var surfaceTransition: AnyTransition {
+        accessibilityReduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98))
+    }
+
+    private func stateAnimation(_ animation: Animation) -> Animation? {
+        accessibilityReduceMotion ? nil : animation
     }
 
     private var statusLine: String {
-        if isRecording {
+        switch voicePhase {
+        case .starting, .recording:
             return "Listening..."
+        case .transcribing:
+            return "Transcribing..."
+        case .idle:
+            guard let statusMessage = statusMessage.nilIfBlank else {
+                return providerStatusMessage
+            }
+            return "\(providerStatusMessage) - \(statusMessage)"
         }
-        guard let statusMessage = statusMessage.nilIfBlank else {
-            return providerStatusMessage
+    }
+}
+
+private enum ComposerActionState: Equatable {
+    case mic
+    case micUnavailable
+    case send
+    case stop
+    case progress
+}
+
+/// The single trailing composer button that morphs between mic, send, stop,
+/// and transcription-progress states.
+private struct ComposerActionButton: View {
+    let state: ComposerActionState
+    let isEnabled: Bool
+    let accessibilityReduceMotion: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(fillColor)
+                if state == .progress {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.blue)
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(isEnabled ? tint : .secondary)
+                        .contentTransition(accessibilityReduceMotion ? .opacity : .symbolEffect(.replace))
+                        .transition(.opacity)
+                }
+            }
+            .frame(width: 44, height: 44)
         }
-        return "\(providerStatusMessage) - \(statusMessage)"
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var systemImage: String {
+        switch state {
+        case .mic:
+            "mic.fill"
+        case .micUnavailable:
+            "mic.slash.fill"
+        case .send:
+            "arrow.up"
+        case .stop:
+            "stop.fill"
+        case .progress:
+            "waveform"
+        }
+    }
+
+    private var tint: Color {
+        switch state {
+        case .mic, .send, .progress:
+            .blue
+        case .micUnavailable:
+            .secondary
+        case .stop:
+            .red
+        }
+    }
+
+    private var fillColor: Color {
+        if state == .progress {
+            return Color.blue.opacity(0.14)
+        }
+        return isEnabled ? tint.opacity(0.14) : Color(.tertiarySystemFill)
+    }
+
+    private var accessibilityLabel: String {
+        switch state {
+        case .mic:
+            "Start recording"
+        case .micUnavailable:
+            "Voice input unavailable"
+        case .send:
+            "Send to LeadWhisper"
+        case .stop:
+            "Stop recording and transcribe"
+        case .progress:
+            "Transcribing"
+        }
+    }
+}
+
+/// Replaces the text field while voice input is active: a live level-driven
+/// waveform during recording, dimmed with a pulsing label while transcribing.
+private struct VoiceRecordingSurface: View {
+    let phase: VoiceInputPhase
+    let audioLevel: Float
+    let reduceMotion: Bool
+
+    @State private var levelHistory: [Float] = Array(repeating: 0, count: 42)
+
+    private var isTranscribing: Bool {
+        phase == .transcribing
+    }
+
+    var body: some View {
+        ZStack {
+            if reduceMotion {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(isTranscribing ? Color.secondary : .red)
+                    Text(label)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+            } else {
+                waveform
+                    .opacity(isTranscribing ? 0.3 : 1)
+                if isTranscribing {
+                    Text("Transcribing...")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .phaseAnimator([0.45, 1.0]) { view, opacity in
+                            view.opacity(opacity)
+                        } animation: { _ in
+                            .easeInOut(duration: 0.7)
+                        }
+                        .transition(.opacity)
+                }
+            }
+        }
+        .frame(height: 24)
+        .frame(maxWidth: .infinity)
+        .onChange(of: audioLevel) { _, newValue in
+            guard !isTranscribing else { return }
+            levelHistory.removeFirst()
+            levelHistory.append(newValue)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+    }
+
+    private var label: String {
+        isTranscribing ? "Transcribing..." : "Listening..."
+    }
+
+    private var waveform: some View {
+        HStack(spacing: 3) {
+            ForEach(Array(levelHistory.enumerated()), id: \.offset) { _, level in
+                Capsule()
+                    .fill(isTranscribing ? Color.secondary : Color.blue)
+                    .frame(width: 3, height: barHeight(for: level))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(.linear(duration: 0.1), value: levelHistory)
+    }
+
+    private func barHeight(for level: Float) -> CGFloat {
+        3 + 21 * CGFloat(min(max(level, 0), 1))
     }
 }
 
@@ -1544,26 +1790,3 @@ private struct ContextWindowUsageRing: View {
     }
 }
 
-private struct ComposerIconButton: View {
-    let systemImage: String
-    let tint: Color
-    let isEnabled: Bool
-    let accessibilityLabel: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(isEnabled ? tint : .secondary)
-                .frame(width: 44, height: 44)
-                .background(
-                    Circle()
-                        .fill(isEnabled ? tint.opacity(0.14) : Color(.tertiarySystemFill))
-                )
-        }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
-        .accessibilityLabel(accessibilityLabel)
-    }
-}
