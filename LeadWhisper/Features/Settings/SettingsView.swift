@@ -95,6 +95,7 @@ struct SettingsView: View {
 
                 Section("Danger Zone") {
                     Button(role: .destructive) {
+                        HapticFeedback.play(.warning)
                         isConfirmingDeleteAllData = true
                     } label: {
                         Label("Delete All Data", systemImage: "trash")
@@ -113,6 +114,12 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .onAppear {
                 refreshOpenAIKeyStatus()
+            }
+            .onChange(of: selectedProviderRawValue) { _, _ in
+                HapticFeedback.play(.selection)
+            }
+            .onChange(of: isAgentDebugModeEnabled) { _, _ in
+                HapticFeedback.play(.selection)
             }
             .confirmationDialog(
                 "Delete all data?",
@@ -134,6 +141,7 @@ struct SettingsView: View {
         do {
             try DemoDataSeeder.seed(in: modelContext)
             statusMessage = "Demo data loaded."
+            HapticFeedback.play(.success)
         } catch {
             actionError = PresentableError(error)
         }
@@ -143,6 +151,7 @@ struct SettingsView: View {
         do {
             try crmRepository.deleteAllData()
             statusMessage = "All data deleted."
+            HapticFeedback.play(.success)
         } catch {
             actionError = PresentableError(error)
         }
@@ -158,6 +167,7 @@ struct SettingsView: View {
             openAIAPIKey = ""
             hasOpenAIAPIKey = true
             statusMessage = "OpenAI API key saved."
+            HapticFeedback.play(.success)
         } catch {
             actionError = PresentableError(error)
         }
@@ -169,6 +179,7 @@ struct SettingsView: View {
             openAIAPIKey = ""
             hasOpenAIAPIKey = false
             statusMessage = "OpenAI API key deleted."
+            HapticFeedback.play(.success)
         } catch {
             actionError = PresentableError(error)
         }

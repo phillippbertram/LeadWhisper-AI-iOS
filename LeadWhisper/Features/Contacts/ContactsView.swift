@@ -51,7 +51,9 @@ struct ContactsView: View {
                     presenting: pendingDeleteContact
                 ) { contact in
                     Button("Delete Contact", role: .destructive) {
-                        perform { try $0.deleteContact(contact) }
+                        if perform({ try $0.deleteContact(contact) }) {
+                            HapticFeedback.play(.success)
+                        }
                         pendingDeleteContact = nil
                     }
                     Button("Cancel", role: .cancel) {
@@ -67,7 +69,9 @@ struct ContactsView: View {
                     presenting: pendingDeleteFollowUp
                 ) { task in
                     Button("Delete Follow-up", role: .destructive) {
-                        perform { try $0.deleteFollowUp(task) }
+                        if perform({ try $0.deleteFollowUp(task) }) {
+                            HapticFeedback.play(.success)
+                        }
                         pendingDeleteFollowUp = nil
                     }
                     Button("Cancel", role: .cancel) {
@@ -87,6 +91,7 @@ struct ContactsView: View {
                 Text("Capture a lead update to create your first local contact.")
             } actions: {
                 Button {
+                    HapticFeedback.play(.lightImpact)
                     sheet = .agent(initialPrompt: nil)
                 } label: {
                     Label("Type Update", systemImage: "keyboard")
@@ -99,6 +104,7 @@ struct ContactsView: View {
                 Text("Try a different name, company, or tag.")
             } actions: {
                 Button {
+                    HapticFeedback.play(.lightImpact)
                     sheet = .agent(initialPrompt: nil)
                 } label: {
                     Label("Type Update", systemImage: "keyboard")
@@ -116,18 +122,36 @@ struct ContactsView: View {
                     ContactDetailView(
                         contact: contact,
                         editContact: { sheet = .editContact(contact) },
-                        startAgent: { sheet = .agent(initialPrompt: agentPrompt(for: contact)) },
+                        startAgent: {
+                            HapticFeedback.play(.lightImpact)
+                            sheet = .agent(initialPrompt: agentPrompt(for: contact))
+                        },
                         editFollowUp: { sheet = .editFollowUp($0) },
-                        updateFollowUpWithAgent: { sheet = .agent(initialPrompt: agentPrompt(for: $0, contact: contact)) },
-                        markFollowUpDone: { task in perform { try $0.markFollowUpDone(task) } },
-                        archiveFollowUp: { task in perform { try $0.archiveFollowUp(task) } },
-                        deleteFollowUp: { pendingDeleteFollowUp = $0 }
+                        updateFollowUpWithAgent: {
+                            HapticFeedback.play(.lightImpact)
+                            sheet = .agent(initialPrompt: agentPrompt(for: $0, contact: contact))
+                        },
+                        markFollowUpDone: { task in
+                            if perform({ try $0.markFollowUpDone(task) }) {
+                                HapticFeedback.play(.success)
+                            }
+                        },
+                        archiveFollowUp: { task in
+                            if perform({ try $0.archiveFollowUp(task) }) {
+                                HapticFeedback.play(.selection)
+                            }
+                        },
+                        deleteFollowUp: {
+                            HapticFeedback.play(.warning)
+                            pendingDeleteFollowUp = $0
+                        }
                     )
                 } label: {
                     ContactRow(contact: contact)
                 }
                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
                     Button {
+                        HapticFeedback.play(.lightImpact)
                         sheet = .agent(initialPrompt: agentPrompt(for: contact))
                     } label: {
                         Label("Agent", systemImage: "sparkles")
@@ -136,6 +160,7 @@ struct ContactsView: View {
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button {
+                        HapticFeedback.play(.warning)
                         pendingDeleteContact = contact
                     } label: {
                         Label("Delete", systemImage: "trash")
@@ -153,11 +178,14 @@ struct ContactsView: View {
         }
     }
 
-    private func perform(_ action: (CRMRepository) throws -> Void) {
+    @discardableResult
+    private func perform(_ action: (CRMRepository) throws -> Void) -> Bool {
         do {
             try action(crmRepository)
+            return true
         } catch {
             actionError = PresentableError(error)
+            return false
         }
     }
 

@@ -78,6 +78,7 @@ struct TodayView: View {
                     Section("Needs Follow-up") {
                         ForEach(opportunitiesNeedingFollowUp) { opportunity in
                             Button {
+                                HapticFeedback.play(.lightImpact)
                                 sheet = .agent(initialPrompt: createFollowUpPrompt(for: opportunity))
                             } label: {
                                 OpportunityNeedsFollowUpRow(opportunity: opportunity)
@@ -120,7 +121,9 @@ struct TodayView: View {
                 presenting: pendingDeleteTask
             ) { task in
                 Button("Delete Follow-up", role: .destructive) {
-                    perform { try $0.deleteFollowUp(task) }
+                    if perform({ try $0.deleteFollowUp(task) }) {
+                        HapticFeedback.play(.success)
+                    }
                     pendingDeleteTask = nil
                 }
                 Button("Cancel", role: .cancel) {
@@ -142,14 +145,18 @@ struct TodayView: View {
         .buttonStyle(.plain)
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
             Button {
-                perform { try $0.markFollowUpDone(task) }
+                if perform({ try $0.markFollowUpDone(task) }) {
+                    HapticFeedback.play(.success)
+                }
             } label: {
                 Label("Done", systemImage: "checkmark")
             }
             .tint(.green)
 
             Button {
-                perform { try $0.archiveFollowUp(task) }
+                if perform({ try $0.archiveFollowUp(task) }) {
+                    HapticFeedback.play(.selection)
+                }
             } label: {
                 Label("Archive", systemImage: "archivebox")
             }
@@ -157,6 +164,7 @@ struct TodayView: View {
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button {
+                HapticFeedback.play(.warning)
                 pendingDeleteTask = task
             } label: {
                 Label("Delete", systemImage: "trash")
@@ -166,11 +174,14 @@ struct TodayView: View {
         .accessibilityHint("Opens the follow-up editor.")
     }
 
-    private func perform(_ action: (CRMRepository) throws -> Void) {
+    @discardableResult
+    private func perform(_ action: (CRMRepository) throws -> Void) -> Bool {
         do {
             try action(crmRepository)
+            return true
         } catch {
             actionError = PresentableError(error)
+            return false
         }
     }
 

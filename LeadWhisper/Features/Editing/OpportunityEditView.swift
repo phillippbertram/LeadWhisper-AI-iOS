@@ -74,6 +74,7 @@ struct OpportunityEditView: View {
         crmRepository.addActivity(title: "Opportunity updated", detail: opportunity.title, entityKind: .opportunity, entityID: opportunity.id)
         do {
             try crmRepository.save()
+            HapticFeedback.play(.success)
             dismiss()
         } catch {
             saveError = PresentableError(error)

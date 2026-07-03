@@ -63,6 +63,7 @@ struct AgentResultView: View {
                     isSelectable: showsActions,
                     isSelected: { !deselectedChangeIDs.contains($0) },
                     toggleSelection: { id in
+                        HapticFeedback.play(.selection)
                         if deselectedChangeIDs.contains(id) {
                             deselectedChangeIDs.remove(id)
                         } else {

@@ -32,5 +32,10 @@ extension View {
         } message: { presentable in
             Text(presentable.message)
         }
+        .onChange(of: error.wrappedValue?.id) { _, newValue in
+            if newValue != nil {
+                HapticFeedback.play(.error)
+            }
+        }
     }
 }

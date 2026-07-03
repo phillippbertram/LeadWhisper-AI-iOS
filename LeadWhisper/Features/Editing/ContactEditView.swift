@@ -67,6 +67,7 @@ struct ContactEditView: View {
         crmRepository.addActivity(title: "Contact updated", detail: contact.fullName, entityKind: .contact, entityID: contact.id)
         do {
             try crmRepository.save()
+            HapticFeedback.play(.success)
             dismiss()
         } catch {
             saveError = PresentableError(error)

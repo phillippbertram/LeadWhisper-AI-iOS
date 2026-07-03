@@ -378,6 +378,7 @@ struct AgentComposerView: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isProcessing else { return }
         let activeReview = activeReviewResult
+        HapticFeedback.play(.lightImpact)
 
         if voiceInput.isRecording {
             voiceInput.stopRecording()
@@ -419,6 +420,10 @@ struct AgentComposerView: View {
             return
         }
 
+        if result.errorMessage != nil {
+            HapticFeedback.play(.warning)
+        }
+
         if !result.draft.proposedChanges.isEmpty {
             result.diffs = Container.shared.changeDiffBuilder().diffs(for: result.draft.proposedChanges)
         }
@@ -450,6 +455,7 @@ struct AgentComposerView: View {
         guard !draft.proposedChanges.isEmpty else { return }
 
         if draft.containsDestructiveChange {
+            HapticFeedback.play(.warning)
             pendingDestructiveRun = PendingAgentSave(draft: draft, transcript: transcript)
             return
         }
@@ -468,6 +474,7 @@ struct AgentComposerView: View {
             activeTranscript = ""
             engine.noteDraftSaved()
             messages.append(.receipt(result.changedRecords))
+            HapticFeedback.play(.success)
             AppLog.agent.info("Agent draft saved changedRecords=\(result.changedRecords.count, privacy: .public)")
         } catch {
             actionError = PresentableError(error)
@@ -481,6 +488,7 @@ struct AgentComposerView: View {
         activeTranscript = ""
         engine.noteDraftCancelled()
         messages.append(.assistant("Draft cancelled", detail: nil, systemImage: "xmark.circle"))
+        HapticFeedback.play(.selection)
         AppLog.agent.info("Agent draft cancelled")
     }
 
@@ -529,9 +537,15 @@ struct AgentComposerView: View {
         Task {
             if voiceInput.isRecording {
                 voiceInput.stopRecording()
+                HapticFeedback.play(.lightImpact)
             } else {
                 isVoiceSession = true
                 await voiceInput.startRecording()
+                if voiceInput.isRecording {
+                    HapticFeedback.play(.mediumImpact)
+                } else {
+                    isVoiceSession = false
+                }
             }
         }
     }

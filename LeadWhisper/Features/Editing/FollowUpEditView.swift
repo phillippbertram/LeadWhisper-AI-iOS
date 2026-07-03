@@ -67,6 +67,7 @@ struct FollowUpEditView: View {
         crmRepository.addActivity(title: "Follow-up updated", detail: task.title, entityKind: .followUp, entityID: task.id)
         do {
             try crmRepository.save()
+            HapticFeedback.play(.success)
             dismiss()
         } catch {
             saveError = PresentableError(error)

@@ -37,7 +37,9 @@ struct OpportunitiesView: View {
                     presenting: pendingDeleteOpportunity
                 ) { opportunity in
                     Button("Delete Opportunity", role: .destructive) {
-                        perform { try $0.deleteOpportunity(opportunity) }
+                        if perform({ try $0.deleteOpportunity(opportunity) }) {
+                            HapticFeedback.play(.success)
+                        }
                         pendingDeleteOpportunity = nil
                     }
                     Button("Cancel", role: .cancel) {
@@ -59,6 +61,7 @@ struct OpportunitiesView: View {
                 Text("Capture a lead update to start building your local pipeline.")
             } actions: {
                 Button {
+                    HapticFeedback.play(.lightImpact)
                     sheet = .agent(initialPrompt: nil)
                 } label: {
                     Label("Type Update", systemImage: "keyboard")
@@ -78,6 +81,7 @@ struct OpportunitiesView: View {
                             OpportunityRow(opportunity: opportunity)
                                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
                                     Button {
+                                        HapticFeedback.play(.lightImpact)
                                         sheet = .agent(initialPrompt: agentPrompt(for: opportunity))
                                     } label: {
                                         Label("Agent", systemImage: "sparkles")
@@ -86,6 +90,7 @@ struct OpportunitiesView: View {
                                 }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                     Button {
+                                        HapticFeedback.play(.warning)
                                         pendingDeleteOpportunity = opportunity
                                     } label: {
                                         Label("Delete", systemImage: "trash")
@@ -106,11 +111,14 @@ struct OpportunitiesView: View {
         }
     }
 
-    private func perform(_ action: (CRMRepository) throws -> Void) {
+    @discardableResult
+    private func perform(_ action: (CRMRepository) throws -> Void) -> Bool {
         do {
             try action(crmRepository)
+            return true
         } catch {
             actionError = PresentableError(error)
+            return false
         }
     }
 

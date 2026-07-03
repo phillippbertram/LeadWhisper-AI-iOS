@@ -6,6 +6,7 @@ struct TalkFloatingButton: View {
 
     var body: some View {
         Button {
+            HapticFeedback.play(.lightImpact)
             open()
         } label: {
             ZStack {
