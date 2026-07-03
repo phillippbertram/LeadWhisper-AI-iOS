@@ -1144,9 +1144,9 @@ private struct AgentPrivacyPopover: View {
     private var detail: String {
         switch providerKind {
         case .appleFoundationModels:
-            "Everything runs on this device. Proposed changes are only saved after you review them."
+            "Agent reasoning runs on this device. Voice dictation uses Apple Speech when you use the mic. Proposed changes are only saved after you review them."
         case .openAI:
-            "Agent messages and local CRM lookup results are sent to OpenAI. Proposed changes are still only saved after you review them."
+            "Agent messages and local CRM lookup results are sent to OpenAI. Voice dictation uses Apple Speech when you use the mic. Proposed changes are still only saved after you review them."
         }
     }
 }
@@ -1303,7 +1303,7 @@ private struct AgentInputBar: View {
                 HStack(spacing: 6) {
                     Image(systemName: isProcessing ? "brain" : isRecording ? "waveform" : "lock.shield")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(isProcessing || isRecording ? .blue : .secondary)
+                        .foregroundStyle(isProcessing || isRecording ? .white : .secondary)
                     Text(statusLine)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -1344,8 +1344,7 @@ private struct AgentInputBar: View {
         if isRecording {
             return "Listening..."
         }
-        guard let statusMessage = statusMessage.nilIfBlank,
-              statusMessage != VoiceInputService.temporarilyDisabledMessage else {
+        guard let statusMessage = statusMessage.nilIfBlank else {
             return providerStatusMessage
         }
         return "\(providerStatusMessage) - \(statusMessage)"

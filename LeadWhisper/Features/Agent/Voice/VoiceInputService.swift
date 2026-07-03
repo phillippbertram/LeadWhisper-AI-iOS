@@ -9,7 +9,7 @@ import Speech
 @MainActor
 @Observable
 final class VoiceInputService {
-    nonisolated static let isTemporarilyDisabled = true
+    nonisolated static let isTemporarilyDisabled = false
     nonisolated static let temporarilyDisabledMessage = "Voice input is temporarily disabled. Type the transcript instead."
     nonisolated static let unavailableMessage = "Voice recording unavailable here. Type the transcript instead."
 
@@ -320,8 +320,19 @@ final class VoiceInputService {
             throw VoiceInputError.speechRecognizerUnavailable
         }
 
+        try await Self.reserveTranscriptionLocaleIfNeeded(locale)
+
         AppLog.voice.debug("SpeechTranscriber selected locale=\(locale.identifier, privacy: .public)")
         return SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+    }
+
+    /// SpeechAnalyzer modules fail at analysis time ("unallocated locales")
+    /// unless their locale is reserved with the system asset inventory first.
+    private static func reserveTranscriptionLocaleIfNeeded(_ locale: Locale) async throws {
+        let reservedLocales = await AssetInventory.reservedLocales
+        guard !reservedLocales.contains(locale) else { return }
+        try await AssetInventory.reserve(locale: locale)
+        AppLog.voice.info("Speech transcription locale reserved locale=\(locale.identifier, privacy: .public)")
     }
 
     private func prepareSpeechAssets(for transcriber: SpeechTranscriber) async throws {
@@ -360,9 +371,13 @@ private final class SpeechRecordingSession {
     private let analyzer: SpeechAnalyzer
     private let transcriber: SpeechTranscriber
 
+    /// Raw mic-format buffers wrapped in `AnalyzerInput` purely because it is
+    /// the framework's Sendable box for crossing off the audio tap thread.
+    private var rawBufferContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var eventContinuation: AsyncThrowingStream<VoiceRecordingEvent, any Error>.Continuation?
     private var analysisTask: Task<Void, Never>?
+    private var conversionTask: Task<Void, Never>?
     private var resultTask: Task<Void, Never>?
     private var transcriptionSegments: [TranscriptionSegment] = []
     private var hasInstalledTap = false
@@ -380,6 +395,17 @@ private final class SpeechRecordingSession {
             throw VoiceInputError.invalidInputFormat
         }
 
+        // The analyzer traps (EXC_BREAKPOINT) when fed buffers in a format the
+        // transcriber model does not support, so analysis runs in the model's
+        // preferred format and every tap buffer is converted into it first.
+        guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
+            compatibleWith: [transcriber],
+            considering: inputFormat
+        ) else {
+            AppLog.voice.warning("No compatible analyzer audio format for inputSampleRate=\(inputFormat.sampleRate, privacy: .public)")
+            throw VoiceInputError.invalidInputFormat
+        }
+
         let eventPipe = AsyncThrowingStream<VoiceRecordingEvent, any Error>.makeStream(
             of: VoiceRecordingEvent.self,
             throwing: (any Error).self
@@ -387,16 +413,23 @@ private final class SpeechRecordingSession {
         eventContinuation = eventPipe.continuation
 
         do {
-            try await analyzer.prepareToAnalyze(in: inputFormat)
+            try await analyzer.prepareToAnalyze(in: analyzerFormat)
+            let bufferPipe = AsyncStream.makeStream(of: AnalyzerInput.self)
+            rawBufferContinuation = bufferPipe.continuation
             let inputPipe = AsyncStream.makeStream(of: AnalyzerInput.self)
             inputContinuation = inputPipe.continuation
             startResultTask()
             startAnalysisTask(inputStream: inputPipe.stream)
-            installTap(on: inputNode, format: inputFormat, continuation: inputPipe.continuation)
+            startConversionTask(
+                buffers: bufferPipe.stream,
+                analyzerFormat: analyzerFormat,
+                continuation: inputPipe.continuation
+            )
+            installTap(on: inputNode, format: inputFormat, continuation: bufferPipe.continuation)
             audioEngine.prepare()
             try audioEngine.start()
             eventContinuation?.yield(.status("Listening..."))
-            AppLog.voice.debug("Audio engine started inputSampleRate=\(inputFormat.sampleRate, privacy: .public) inputChannels=\(inputFormat.channelCount, privacy: .public)")
+            AppLog.voice.debug("Audio engine started inputSampleRate=\(inputFormat.sampleRate, privacy: .public) inputChannels=\(inputFormat.channelCount, privacy: .public) analyzerSampleRate=\(analyzerFormat.sampleRate, privacy: .public)")
             return eventPipe.stream
         } catch {
             finish(throwing: error)
@@ -448,6 +481,21 @@ private final class SpeechRecordingSession {
         }
     }
 
+    private func startConversionTask(
+        buffers: AsyncStream<AnalyzerInput>,
+        analyzerFormat: AVAudioFormat,
+        continuation: AsyncStream<AnalyzerInput>.Continuation
+    ) {
+        conversionTask = Task {
+            let converter = PCMBufferConverter(outputFormat: analyzerFormat)
+            for await rawInput in buffers {
+                guard let converted = converter.convert(rawInput.buffer) else { continue }
+                continuation.yield(AnalyzerInput(buffer: converted))
+            }
+            continuation.finish()
+        }
+    }
+
     private func installTap(
         on inputNode: AVAudioInputNode,
         format inputFormat: AVAudioFormat,
@@ -495,11 +543,15 @@ private final class SpeechRecordingSession {
             hasInstalledTap = false
         }
 
+        rawBufferContinuation?.finish()
+        rawBufferContinuation = nil
         inputContinuation?.finish()
         inputContinuation = nil
         analysisTask?.cancel()
+        conversionTask?.cancel()
         resultTask?.cancel()
         analysisTask = nil
+        conversionTask = nil
         resultTask = nil
 
         if let error {
@@ -537,4 +589,57 @@ private final class SpeechRecordingSession {
 private struct TranscriptionSegment {
     var range: CMTimeRange
     var text: String
+}
+
+/// Converts microphone-format PCM buffers into the analyzer's required format
+/// (typically 16 kHz mono) before they are handed to `SpeechAnalyzer`.
+private final class PCMBufferConverter {
+    private let outputFormat: AVAudioFormat
+    private var converter: AVAudioConverter?
+
+    init(outputFormat: AVAudioFormat) {
+        self.outputFormat = outputFormat
+    }
+
+    func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let inputFormat = buffer.format
+        guard inputFormat != outputFormat else { return buffer }
+
+        if converter == nil || converter?.inputFormat != inputFormat {
+            converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+            // Sacrifices the first samples to keep buffer timestamps free of
+            // resampler priming drift, matching Apple's transcription sample.
+            converter?.primeMethod = .none
+        }
+        guard let converter else {
+            AppLog.voice.error("Audio converter unavailable inputSampleRate=\(inputFormat.sampleRate, privacy: .public) outputSampleRate=\(self.outputFormat.sampleRate, privacy: .public)")
+            return nil
+        }
+
+        let sampleRateRatio = outputFormat.sampleRate / inputFormat.sampleRate
+        let frameCapacity = AVAudioFrameCount((Double(buffer.frameLength) * sampleRateRatio).rounded(.up))
+        guard frameCapacity > 0,
+              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCapacity)
+        else {
+            return nil
+        }
+
+        var conversionError: NSError?
+        var consumedInput = false
+        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, inputStatus in
+            if consumedInput {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            consumedInput = true
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+
+        guard status != .error else {
+            AppLog.voice.error("Audio buffer conversion failed error=\(conversionError?.localizedDescription ?? "unknown", privacy: .public)")
+            return nil
+        }
+        return outputBuffer
+    }
 }

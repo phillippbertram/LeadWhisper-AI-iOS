@@ -1,3 +1,4 @@
+import BeamBorder
 import SwiftUI
 
 struct TalkFloatingButton: View {
@@ -60,7 +61,7 @@ struct TalkFloatingButton: View {
 private struct TalkFloatingButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            // .scaleEffect(configuration.isPressed ? 0.94 : 1)
             .shadow(
                 color: .blue.opacity(configuration.isPressed ? 0.16 : 0.24),
                 radius: configuration.isPressed ? 10 : 18,
@@ -73,7 +74,8 @@ private struct TalkFloatingButtonStyle: ButtonStyle {
                 x: 0,
                 y: configuration.isPressed ? 5 : 9
             )
-            .animation(.snappy(duration: 0.18), value: configuration.isPressed)
+            // .animation(.snappy(duration: 0.18), value: configuration.isPressed)
+            .glassEffect(.regular.interactive())
     }
 }
 

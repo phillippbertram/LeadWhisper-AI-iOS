@@ -34,7 +34,8 @@ enum AgentProviderKind: String, CaseIterable, Identifiable, Sendable {
     }
 
     var modelStatusLabel: String {
-        "\(statusLabel) model · \(modelDisplayName)"
+        // "\(statusLabel) model · \(modelDisplayName)"
+        "\(modelDisplayName)"
     }
 
     var privacySystemImage: String {

@@ -8,10 +8,6 @@ extension VoiceInputService {
     /// Recognizer availability is verified in `refreshRecordingCapability()`
     /// when recording actually starts.
     static func defaultRecordingCapability() -> VoiceRecordingCapability {
-        guard !isTemporarilyDisabled else {
-            return .unavailable(temporarilyDisabledMessage)
-        }
-
         #if targetEnvironment(simulator)
         return .unavailable(unavailableMessage)
         #else
@@ -22,7 +18,7 @@ extension VoiceInputService {
         #endif
     }
 
-    static func friendlyMessage(for error: Error) -> String {
+    nonisolated static func friendlyMessage(for error: Error) -> String {
         if let error = error as? VoiceInputError {
             return error.errorDescription ?? unavailableMessage
         }
@@ -44,7 +40,7 @@ extension VoiceInputService {
         }
     }
 
-    static func isUnavailableAudioError(_ error: Error) -> Bool {
+    nonisolated static func isUnavailableAudioError(_ error: Error) -> Bool {
         guard let error = error as? VoiceInputError else { return false }
         switch error {
         case .recordingUnavailable, .noAudioInput, .invalidInputFormat, .noSpeechRecognizer, .speechRecognizerUnavailable, .missingUsageDescription:
