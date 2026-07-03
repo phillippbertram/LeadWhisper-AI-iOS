@@ -238,6 +238,12 @@ Voice recording is intentionally unavailable in the simulator. You can type tran
 
 To try the app immediately, open Settings and tap `Load Demo Data`, then use the Agent tab or the floating talk button from the main CRM views. Apple On-device is selected by default. To use OpenAI, open Settings, switch the Agent provider to `OpenAI`, and save an API key in the OpenAI section.
 
+### OpenAI API key
+
+For the optional OpenAI provider, create or copy an API key from OpenAI's [API keys page](https://platform.openai.com/settings/organization/api-keys). OpenAI's current guidance is the source of truth; see [Production best practices: API keys](https://developers.openai.com/api/docs/guides/production-best-practices#api-keys).
+
+In the app, open Settings, switch the Agent provider to `OpenAI`, paste the key into the OpenAI section, and save it. LeadWhisper stores the key in Keychain. Do not commit API keys to source code, logs, screenshots, fixtures, or README examples.
+
 ## Support
 
 <a href="https://www.buymeacoffee.com/phillippbertram" target="_blank">
