@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		519E97A12FF6C51300185A4A /* FactoryKit in Frameworks */ = {isa = PBXBuildFile; productRef = 519E97A02FF6C51300185A4A /* FactoryKit */; };
 		7B4F00032FF7000000185A4A /* BeamBorder in Frameworks */ = {isa = PBXBuildFile; productRef = 7B4F00022FF7000000185A4A /* BeamBorder */; };
+		8A0000052FF8000000000001 /* SwiftAgentKit in Frameworks */ = {isa = PBXBuildFile; productRef = 8A0000022FF8000000000001 /* SwiftAgentKit */; };
+		8A0000062FF8000000000001 /* SwiftAgentKitOpenAI in Frameworks */ = {isa = PBXBuildFile; productRef = 8A0000032FF8000000000001 /* SwiftAgentKitOpenAI */; };
+		8A0000072FF8000000000001 /* SwiftAgentKitFoundationModels in Frameworks */ = {isa = PBXBuildFile; productRef = 8A0000042FF8000000000001 /* SwiftAgentKitFoundationModels */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +33,9 @@
 			files = (
 				519E97A12FF6C51300185A4A /* FactoryKit in Frameworks */,
 				7B4F00032FF7000000185A4A /* BeamBorder in Frameworks */,
+				8A0000052FF8000000000001 /* SwiftAgentKit in Frameworks */,
+				8A0000062FF8000000000001 /* SwiftAgentKitOpenAI in Frameworks */,
+				8A0000072FF8000000000001 /* SwiftAgentKitFoundationModels in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,6 +80,9 @@
 			packageProductDependencies = (
 				7B4F00022FF7000000185A4A /* BeamBorder */,
 				519E97A02FF6C51300185A4A /* FactoryKit */,
+				8A0000022FF8000000000001 /* SwiftAgentKit */,
+				8A0000032FF8000000000001 /* SwiftAgentKitOpenAI */,
+				8A0000042FF8000000000001 /* SwiftAgentKitFoundationModels */,
 			);
 			productName = LeadWhisper;
 			productReference = 519E95C82FF68DA000185A4A /* LeadWhisper.app */;
@@ -106,6 +115,7 @@
 			packageReferences = (
 				7B4F00012FF7000000185A4A /* XCRemoteSwiftPackageReference "BeamBorder" */,
 				519E979F2FF6C51300185A4A /* XCRemoteSwiftPackageReference "Factory" */,
+				8A0000012FF8000000000001 /* XCLocalSwiftPackageReference "Packages/SwiftAgentKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 519E95C92FF68DA000185A4A /* Products */;
@@ -136,6 +146,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		8A0000012FF8000000000001 /* XCLocalSwiftPackageReference "Packages/SwiftAgentKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/SwiftAgentKit;
+		};
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCBuildConfiguration section */
 		519E95D32FF68DA100185A4A /* Debug */ = {
@@ -389,6 +406,21 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		8A0000022FF8000000000001 /* SwiftAgentKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8A0000012FF8000000000001 /* XCLocalSwiftPackageReference "Packages/SwiftAgentKit" */;
+			productName = SwiftAgentKit;
+		};
+		8A0000032FF8000000000001 /* SwiftAgentKitOpenAI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8A0000012FF8000000000001 /* XCLocalSwiftPackageReference "Packages/SwiftAgentKit" */;
+			productName = SwiftAgentKitOpenAI;
+		};
+		8A0000042FF8000000000001 /* SwiftAgentKitFoundationModels */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8A0000012FF8000000000001 /* XCLocalSwiftPackageReference "Packages/SwiftAgentKit" */;
+			productName = SwiftAgentKitFoundationModels;
+		};
 		519E97A02FF6C51300185A4A /* FactoryKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 519E979F2FF6C51300185A4A /* XCRemoteSwiftPackageReference "Factory" */;

@@ -1,8 +1,7 @@
 import Foundation
-import FoundationModels
+import SwiftAgentKit
 
-@Generable
-enum AgentToolScope: String, CaseIterable, Codable, Sendable {
+nonisolated enum AgentToolScope: String, CaseIterable, Codable, Sendable {
     case none
     case contacts
     case opportunities
@@ -49,36 +48,33 @@ enum AgentToolScope: String, CaseIterable, Codable, Sendable {
     }
 }
 
-@Generable
-struct AgentToolPlan: Codable, Sendable {
-    @Guide(description: "Smallest safe lookup tool scope for the next agent turn. Use full if uncertain.")
+nonisolated struct AgentToolPlan: Codable, Sendable {
     var toolScope: AgentToolScope
 
-    @Guide(description: "Short reason for the chosen tool scope.")
     var reason: String
 }
 
 extension AgentToolPlan {
-    static var fallback: AgentToolPlan {
+    nonisolated static var fallback: AgentToolPlan {
         AgentToolPlan(toolScope: .full, reason: "Tool planning failed; all read-only lookup tools are available.")
     }
 
-    static var openAIJSONSchema: JSONValue {
-        .object([
-            "type": .string("object"),
-            "additionalProperties": .bool(false),
-            "properties": .object([
-                "toolScope": .object([
-                    "type": .string("string"),
-                    "enum": .stringArray(AgentToolScope.allCases.map(\.rawValue)),
-                    "description": .string("Smallest safe lookup tool scope for the next agent turn. Use full if uncertain.")
-                ]),
-                "reason": .object([
-                    "type": .string("string"),
-                    "description": .string("Short reason for the chosen tool scope.")
-                ])
-            ]),
-            "required": .stringArray(["toolScope", "reason"])
-        ])
+    nonisolated static var outputSchema: AgentOutputSchema<AgentToolPlan> {
+        AgentOutputSchema(
+            name: "agent_tool_plan",
+            schema: .object(
+                AgentSchema.Object(
+                    name: "AgentToolPlan",
+                    properties: [
+                        .init(
+                            "toolScope",
+                            description: "Smallest safe lookup tool scope for the next agent turn. Use full if uncertain.",
+                            schema: .string(allowedValues: AgentToolScope.allCases.map(\.rawValue))
+                        ),
+                        .init("reason", description: "Short reason for the chosen tool scope.", schema: .string())
+                    ]
+                )
+            )
+        )
     }
 }

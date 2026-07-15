@@ -34,9 +34,9 @@ extension Container {
     }
 
     @MainActor
-    var agentModelClientRegistry: Factory<AgentModelClientRegistry> {
+    var leadWhisperAgentFactory: Factory<LeadWhisperAgentFactory> {
         self {
-            AgentModelClientRegistry(credentialStore: self.agentCredentialStore())
+            LeadWhisperAgentFactory(credentialStore: self.agentCredentialStore())
         }
         .singleton
     }
@@ -46,7 +46,7 @@ extension Container {
         self {
             AgentConversationEngine(
                 toolDataSource: self.agentToolDataSource(),
-                modelRegistry: self.agentModelClientRegistry()
+                agentFactory: self.leadWhisperAgentFactory()
             )
         }
     }

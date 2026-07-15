@@ -125,39 +125,40 @@ Voice input uses Apple's Speech and AVFoundation APIs. On unsupported environmen
 
 ## Agent Architecture
 
-The Agent tab is the app's primary workflow surface. It is a Swift-native provider-backed agent where the model, not a scripted workflow, decides each turn whether to answer, ask one follow-up question, call a local lookup tool, or propose reviewable CRM changes.
+The Agent tab is the app's primary workflow surface. Its reusable runtime now lives in the local [`SwiftAgentKit`](Packages/SwiftAgentKit/README.md) package. The app composes a provider model, prompts, read-only tools, compact memory, tool selection, hooks, and runtime policy from the outside; the SDK has no built-in provider registry.
 
 ```mermaid
 flowchart TD
-    S[Settings<br/>provider + OpenAI key] --> E[AgentConversationEngine]
-    U[User message] --> E
-    E --> M[AgentContextMemory<br/>compact rolling continuity]
-    E --> P[AgentToolPlan<br/>LLM tool planning]
-    P --> R{ReAct loop}
-    R -->|Action| T[Read-only tools<br/>findContacts / findOpportunities / findFollowUps<br/>getContactDetails / getPipelineSummary]
-    T -->|Observation| R
-    R -->|Thought recorded| A[AgentTurn]
-    A -->|reply| C[Chat bubble]
-    A -->|clarify| Q[One question with options]
-    A -->|propose| V[Review card<br/>old-to-new diffs / per-change selection]
-    Q --> U
-    V -->|Cancel| U
-    V -->|Save, destructive changes reconfirmed| X[ChangeExecutor]
+    S["Settings: provider and OpenAI key"] --> F["LeadWhisperAgentFactory"]
+    F --> M["OpenAIResponsesModel or FoundationModelsModel"]
+    F --> C["LeadWhisper prompts, CRM tools, memory, selector, hooks, policy"]
+    U["User message"] --> E["AgentConversationEngine facade"]
+    E --> A["SwiftAgentKit Agent<AgentTurn>"]
+    M --> A
+    C --> A
+    A --> T["Shared tool executor and provider loop"]
+    T --> R["Typed AgentTurn"]
+    R --> E
+    E --> V["CRM validation and review card"]
+    V -->|"Cancel"| U
+    V -->|"Confirmed save"| X["ChangeExecutor"]
     X --> D[(SwiftData)]
 ```
 
 ### Core loop
 
-- `AgentConversationEngine` owns memory, loop guards, draft validation, and review-before-save.
-- Before the main ReAct turn, the selected model returns an `AgentToolPlan` with the smallest safe read-only tool scope.
-- The model can call local tools for contacts, opportunities, follow-ups, contact details, and pipeline summary.
-- Each turn returns an `AgentTurn`: reply, clarification, or proposal.
+- `Agent<Output>` owns model invocation, timeout, tool and repeat limits, compact-memory access, context-overflow retry, and lifecycle events.
+- `AgentConversationEngine` is an app-facing facade for the local due-overview shortcut, CRM validation, clarification limits, save/cancel feedback, timeline mapping, and review-before-save.
+- Apple uses a transient model-generated `AgentToolPlan` with a safe fallback to all read-only tools. OpenAI receives all configured CRM tools and chooses calls within its Responses API roundtrips.
+- `AgentSchema` is the single source for `AgentTurn` and tool argument schemas. It becomes strict JSON Schema for OpenAI and `DynamicGenerationSchema` for Apple.
+- The shared `AnyAgentTool` executor runs contact, opportunity, follow-up, contact-detail, and pipeline-summary lookups for either provider.
 
 ### Provider sessions
 
 - Apple runs the main turn in a [`LanguageModelSession`](https://developer.apple.com/documentation/foundationmodels/languagemodelsession) with planned tools attached.
-- OpenAI sends compact memory and tool roundtrips through the Responses API, using Structured Outputs for `AgentToolPlan` and `AgentTurn`.
-- Provider clients own model-specific calls; the Swift agent harness stays separate from the selected model API.
+- OpenAI sends compact memory and tool roundtrips through the Responses API, using Structured Outputs for `AgentTurn`.
+- `AgentProviderKind` remains an app UI preference. `LeadWhisperAgentFactory` creates the selected adapter and injects it as `any AgentModel`; switching providers replaces the entire runtime and discards the old provider session and memory.
+- OpenAI Keychain access remains app-owned. The adapter only receives an async key provider and model configuration.
 
 ### Context management
 
@@ -165,7 +166,7 @@ flowchart TD
 - LeadWhisper reads that limit dynamically so the app can adapt to OS, model, or hardware changes.
 - The engine uses iOS 26.4+ Foundation Models token-count APIs to measure Apple instructions, tools, prompts, transcript, and schema usage.
 - OpenAI context usage is estimated locally so draft text is not sent to the network just to count tokens while the user is typing.
-- `AgentContextMemory` carries only recent turns, open clarifications, relevant local IDs, and draft outcomes into the next turn.
+- `LeadWhisperAgentMemory` implements the SDK's `AgentMemory` contract and carries only recent turns, open clarifications, relevant local IDs, and draft outcomes into the next turn.
 
 ### Trace, guards, and approval
 
@@ -183,13 +184,13 @@ Building this in Swift is still much more hands-on than building a comparable se
 | --- | --- |
 | Limited community patterns | Foundation Models is young, with fewer examples and production write-ups than cloud LLM stacks. |
 | Foundation Models context pressure | The on-device privacy story is compelling, but the hard context limit makes real agent behavior fragile. |
-| No full Swift agent framework | Foundation Models provides sessions, schemas, token counting, and tools, not a full runtime like [LangChain Agents](https://docs.langchain.com/oss/python/langchain/agents) or the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/). |
-| More app-owned runtime code | LeadWhisper owns provider switching, tool planning, tool calls, loop guards, compact memory, overflow retry, trace display, draft validation, diffing, and approval. |
+| Young Swift agent ecosystem | `SwiftAgentKit` demonstrates a small native runtime, but it deliberately covers less than [Strands Agents](https://strandsagents.com/), [LangChain Agents](https://docs.langchain.com/oss/python/langchain/agents), or the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/). |
+| Explicit ownership boundary | The SDK owns reusable provider, tool, memory, policy, and hook mechanics. LeadWhisper still owns CRM validation, trace presentation, diffing, destructive confirmation, and approval. |
 | Cloud providers change privacy | The V1 OpenAI path is bring-your-own-key and direct from the app to OpenAI. A production app would usually add a backend proxy for credentials, auth, quotas, logging, orchestration, and privacy controls. |
 
 ## Outlook
 
-LeadWhisper now has the first provider boundary in place: Apple On-device remains available as the constrained original path, and OpenAI can be selected manually for practical cloud-backed drafting. The next architectural step would be to replace the BYO-key path with a production proxy that protects credentials, adds auth and quotas, and makes cloud usage auditable.
+LeadWhisper now composes both providers through the same public `Agent` runtime. A later optional `SwiftAgentKitMacros` target could add `@AgentTool` and `@AgentOutput` code generation while leaving the explicit `AgentSchema` contract underneath; V1 intentionally avoids a SwiftSyntax dependency. On the product side, the next production step would still be replacing the BYO-key path with a proxy that protects credentials, adds auth and quotas, and makes cloud usage auditable.
 
 The OS 27 betas also point toward a more flexible Foundation Models ecosystem. Anthropic's [Claude for Foundation Models](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/apple-foundation-models) package makes Claude available as a server-side `LanguageModel` provider for Apple's Foundation Models framework, and Apple documents [`PrivateCloudComputeLanguageModel`](https://developer.apple.com/documentation/foundationmodels/privatecloudcomputelanguagemodel) as another Foundation Models type to watch. Both directions could strengthen the Swift-native provider interface and let LeadWhisper keep the same review-before-save harness while adding more provider choices later, but they do not automatically solve privacy, credential, backend, or auditability questions.
 
@@ -206,6 +207,7 @@ The OS 27 betas also point toward a more flexible Foundation Models ecosystem. A
 - [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses)
 - [OpenAI Function Calling](https://platform.openai.com/docs/guides/function-calling)
 - [OpenAI Structured Outputs](https://platform.openai.com/docs/guides/structured-outputs)
+- [Strands Agents](https://strandsagents.com/)
 - [LangChain Agents](https://docs.langchain.com/oss/python/langchain/agents)
 - [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)
 - [Claude for Apple Foundation Models](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/apple-foundation-models)
@@ -213,7 +215,7 @@ The OS 27 betas also point toward a more flexible Foundation Models ecosystem. A
 ## Tech Stack
 
 - Swift 6, SwiftUI, and SwiftData
-- Foundation Models and OpenAI Responses API
+- SwiftAgentKit, Foundation Models, and OpenAI Responses API
 - Security / Keychain
 - Speech and AVFoundation
 

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftAgentKit
 
 struct AgentContextMemoryLimits: Sendable, Hashable {
     var recentTurns: Int
@@ -24,9 +25,7 @@ struct AgentContextMemoryLimits: Sendable, Hashable {
     )
 }
 
-/// Compact continuity state that survives session resets without carrying the
-/// full Foundation Models transcript and completed tool calls forward.
-struct AgentContextMemory: Sendable {
+actor LeadWhisperAgentMemory: AgentMemory {
     enum DraftOutcome: String, Sendable {
         case saved
         case cancelled
@@ -37,10 +36,10 @@ struct AgentContextMemory: Sendable {
     private var outcomes: [String] = []
     private var relevantRecords: [MemoryRecord] = []
     private var pendingDraftSummary: String?
-    private(set) var openClarification: String?
-    private(set) var turnsSinceSessionRefresh = 0
+    private var openClarification: String?
+    private var turnsSinceSessionRefresh = 0
 
-    init(limits: AgentContextMemoryLimits = .appleFoundationModels) {
+    init(limits: AgentContextMemoryLimits) {
         self.limits = limits
     }
 
@@ -50,34 +49,50 @@ struct AgentContextMemory: Sendable {
     }
 
     var estimatedTokenCount: Int {
-        roughTokenCount(promptPrefix() ?? "")
+        roughTokenCount(context() ?? "")
     }
 
-    var isEmpty: Bool {
-        recentTurns.isEmpty &&
-            outcomes.isEmpty &&
-            relevantRecords.isEmpty &&
-            pendingDraftSummary == nil &&
-            openClarification == nil
+    func context() -> String? {
+        guard !isEmpty else { return nil }
+
+        var lines = [
+            "Context memory from earlier turns. Treat it as continuity, but verify local IDs with tools before updating or deleting records."
+        ]
+
+        if !recentTurns.isEmpty {
+            lines.append("Recent turns:")
+            lines += recentTurns.map { "- \($0.role): \($0.text)" }
+        }
+        if let openClarification {
+            lines.append("Open question: \(openClarification)")
+        }
+        if !relevantRecords.isEmpty {
+            lines.append("Relevant local records:")
+            lines += relevantRecords.map { "- \($0.kind) id=\($0.id) \($0.label)" }
+        }
+        if let pendingDraftSummary {
+            lines.append("Pending draft: \(pendingDraftSummary)")
+        }
+        if !outcomes.isEmpty {
+            lines.append("Recent draft outcomes:")
+            lines += outcomes.map { "- \($0)" }
+        }
+        return lines.joined(separator: "\n")
     }
 
-    mutating func reset() {
-        recentTurns = []
-        outcomes = []
-        relevantRecords = []
-        pendingDraftSummary = nil
-        openClarification = nil
-        turnsSinceSessionRefresh = 0
+    func record(_ entry: AgentMemoryEntry) {
+        switch entry {
+        case .user(let text):
+            appendTurn(role: "User", text: text)
+            turnsSinceSessionRefresh += 1
+        case .assistant(let text):
+            appendTurn(role: "Assistant", text: text)
+        case .system(let text):
+            appendOutcome(text)
+        }
     }
 
-    mutating func recordUserMessage(_ message: String) {
-        appendTurn(role: "User", text: message)
-        turnsSinceSessionRefresh += 1
-    }
-
-    mutating func record(_ result: AgentRunResult) {
-        appendTurn(role: "Assistant", text: result.message)
-
+    func recordResultMetadata(_ result: AgentRunResult) {
         if result.kind == .clarify {
             openClarification = result.draft.clarification?.question.nilIfBlank
         } else {
@@ -90,7 +105,7 @@ struct AgentContextMemory: Sendable {
         }
     }
 
-    mutating func recordOutcome(_ outcome: DraftOutcome) {
+    func recordOutcome(_ outcome: DraftOutcome) {
         let summary = pendingDraftSummary ?? "last draft"
         appendOutcome("\(outcome.rawValue) \(summary)")
         pendingDraftSummary = nil
@@ -98,49 +113,33 @@ struct AgentContextMemory: Sendable {
         turnsSinceSessionRefresh = limits.refreshEveryTurns ?? turnsSinceSessionRefresh
     }
 
-    mutating func markSessionRefreshed() {
+    func markSessionRefreshed() {
         turnsSinceSessionRefresh = 0
     }
 
-    mutating func updateLimits(_ newLimits: AgentContextMemoryLimits) {
+    func updateLimits(_ newLimits: AgentContextMemoryLimits) {
         limits = newLimits
         trimStoredCollections()
     }
 
-    func promptPrefix() -> String? {
-        guard !isEmpty else { return nil }
-
-        var lines = [
-            "Context memory from earlier turns. Treat it as continuity, but verify local IDs with tools before updating or deleting records."
-        ]
-
-        if !recentTurns.isEmpty {
-            lines.append("Recent turns:")
-            lines += recentTurns.map { "- \($0.role): \($0.text)" }
-        }
-
-        if let openClarification {
-            lines.append("Open question: \(openClarification)")
-        }
-
-        if !relevantRecords.isEmpty {
-            lines.append("Relevant local records:")
-            lines += relevantRecords.map { "- \($0.kind) id=\($0.id) \($0.label)" }
-        }
-
-        if let pendingDraftSummary {
-            lines.append("Pending draft: \(pendingDraftSummary)")
-        }
-
-        if !outcomes.isEmpty {
-            lines.append("Recent draft outcomes:")
-            lines += outcomes.map { "- \($0)" }
-        }
-
-        return lines.joined(separator: "\n")
+    func reset() {
+        recentTurns.removeAll(keepingCapacity: true)
+        outcomes.removeAll(keepingCapacity: true)
+        relevantRecords.removeAll(keepingCapacity: true)
+        pendingDraftSummary = nil
+        openClarification = nil
+        turnsSinceSessionRefresh = 0
     }
 
-    private mutating func appendTurn(role: String, text: String) {
+    private var isEmpty: Bool {
+        recentTurns.isEmpty &&
+            outcomes.isEmpty &&
+            relevantRecords.isEmpty &&
+            pendingDraftSummary == nil &&
+            openClarification == nil
+    }
+
+    private func appendTurn(role: String, text: String) {
         guard let compact = compactText(text) else { return }
         recentTurns.append(MemoryTurn(role: role, text: compact))
         if recentTurns.count > limits.recentTurns {
@@ -148,14 +147,14 @@ struct AgentContextMemory: Sendable {
         }
     }
 
-    private mutating func appendOutcome(_ outcome: String) {
+    private func appendOutcome(_ outcome: String) {
         outcomes.append(compactText(outcome) ?? outcome)
         if outcomes.count > limits.outcomes {
             outcomes.removeFirst(outcomes.count - limits.outcomes)
         }
     }
 
-    private mutating func recordRelevantTargets(from changes: [ProposedChange]) {
+    private func recordRelevantTargets(from changes: [ProposedChange]) {
         for change in changes {
             guard let id = change.targetID?.nilIfBlank else { continue }
             let record = MemoryRecord(
@@ -190,7 +189,7 @@ struct AgentContextMemory: Sendable {
         return "\(trimmed.prefix(limits.compactTextCharacters - 3))..."
     }
 
-    private mutating func trimStoredCollections() {
+    private func trimStoredCollections() {
         if recentTurns.count > limits.recentTurns {
             recentTurns.removeFirst(recentTurns.count - limits.recentTurns)
         }
@@ -215,7 +214,7 @@ private struct MemoryRecord: Sendable {
 }
 
 private extension ProposedChange {
-    var memoryLabel: String {
+    nonisolated var memoryLabel: String {
         [
             title.nilIfBlank,
             contactName?.nilIfBlank,
@@ -230,7 +229,7 @@ private extension ProposedChange {
 }
 
 private extension ProposedChangeAction {
-    var recordKind: String {
+    nonisolated var recordKind: String {
         switch self {
         case .createContact, .updateContact, .deleteContact:
             "contact"
@@ -244,7 +243,7 @@ private extension ProposedChangeAction {
     }
 }
 
-private func roughTokenCount(_ text: String) -> Int {
+private nonisolated func roughTokenCount(_ text: String) -> Int {
     guard !text.isEmpty else { return 0 }
-    return max(1, Int((Double(text.count) / 4.0).rounded(.up)))
+    return max(1, Int((Double(text.count) / 4).rounded(.up)))
 }

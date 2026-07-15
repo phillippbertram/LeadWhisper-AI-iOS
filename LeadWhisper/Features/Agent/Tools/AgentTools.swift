@@ -1,6 +1,6 @@
 import Foundation
-import FoundationModels
 import OSLog
+import SwiftAgentKit
 
 struct AgentToolOutputPolicy: Sendable, Hashable {
     var resultLimit: Int
@@ -26,49 +26,27 @@ struct AgentToolOutputPolicy: Sendable, Hashable {
     )
 }
 
-@Generable(description: "Arguments for looking up contacts in the local CRM.")
-struct FindContactsArguments: Sendable {
-    @Guide(description: "Short name, company, or keyword.")
+nonisolated struct FindContactsArguments: Codable, Sendable {
     var query: String
-
-    init(query: String) {
-        self.query = query
-    }
 }
 
-@Generable(description: "Arguments for looking up opportunities in the local CRM.")
-struct FindOpportunitiesArguments: Sendable {
-    @Guide(description: "Short title, company, stage, or keyword.")
+nonisolated struct FindOpportunitiesArguments: Codable, Sendable {
     var query: String
-
-    init(query: String) {
-        self.query = query
-    }
 }
 
-@Generable(description: "Arguments for looking up follow-up tasks in the local CRM.")
-struct FindFollowUpsArguments: Sendable {
-    @Guide(description: "Short contact, title, date, or keyword.")
+nonisolated struct FindFollowUpsArguments: Codable, Sendable {
     var query: String
-
-    init(query: String) {
-        self.query = query
-    }
 }
 
-/// Thrown by the engine's budget wrapper instead of running another lookup.
-/// This must escape the tool call so the app can end the turn immediately.
-struct AgentToolBudgetExceeded: LocalizedError {
-    var reason: String
-
-    var errorDescription: String? {
-        "Agent tool budget exceeded. \(reason)"
-    }
+nonisolated struct ContactDetailsArguments: Codable, Sendable {
+    var query: String
 }
 
-struct AgentTurnTimeout: Error {}
+nonisolated struct PipelineSummaryArguments: Codable, Sendable {
+    var focus: String?
+}
 
-struct FindContactsTool: Tool {
+struct FindContactsTool: AgentTool {
     let dataSource: AgentToolDataSource
     var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
@@ -76,22 +54,25 @@ struct FindContactsTool: Tool {
     var description: String {
         "Search existing local CRM contacts by combined fuzzy name, company, notes, or tags. This tool is read-only."
     }
+    var argumentsSchema: AgentSchema {
+        Self.querySchema(name: "FindContactsArguments", description: "Short name, company, or keyword.")
+    }
 
     @concurrent
-    func call(arguments: FindContactsArguments) async throws -> String {
+    func call(arguments: FindContactsArguments, context: AgentToolContext) async throws -> AgentToolResult {
         let key = arguments.query.searchKey
         guard !key.isEmpty else {
             AppLog.tools.warning("findContacts rejected empty query")
-            return ToolText.emptyQuery
+            return AgentToolResult(modelContent: ToolText.emptyQuery)
         }
 
         let matches = try await dataSource.contacts(arguments.query, outputPolicy.resultLimit)
         AppLog.tools.debug("findContacts query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
-        return ToolText.contacts(matches, policy: outputPolicy)
+        return AgentToolResult(modelContent: ToolText.contacts(matches, policy: outputPolicy))
     }
 }
 
-struct FindOpportunitiesTool: Tool {
+struct FindOpportunitiesTool: AgentTool {
     let dataSource: AgentToolDataSource
     var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
@@ -99,32 +80,28 @@ struct FindOpportunitiesTool: Tool {
     var description: String {
         "Search existing local CRM opportunities by combined fuzzy title, company, stage, budget, notes, or tags. This tool is read-only."
     }
+    var argumentsSchema: AgentSchema {
+        FindContactsTool.querySchema(
+            name: "FindOpportunitiesArguments",
+            description: "Short title, company, stage, or keyword."
+        )
+    }
 
     @concurrent
-    func call(arguments: FindOpportunitiesArguments) async throws -> String {
+    func call(arguments: FindOpportunitiesArguments, context: AgentToolContext) async throws -> AgentToolResult {
         let key = arguments.query.searchKey
         guard !key.isEmpty else {
             AppLog.tools.warning("findOpportunities rejected empty query")
-            return ToolText.emptyQuery
+            return AgentToolResult(modelContent: ToolText.emptyQuery)
         }
 
         let matches = try await dataSource.opportunities(arguments.query, outputPolicy.resultLimit)
         AppLog.tools.debug("findOpportunities query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
-        return ToolText.opportunities(matches, policy: outputPolicy)
+        return AgentToolResult(modelContent: ToolText.opportunities(matches, policy: outputPolicy))
     }
 }
 
-@Generable(description: "Arguments for reading one contact's full local CRM details.")
-struct ContactDetailsArguments: Sendable {
-    @Guide(description: "Contact name or company to look up.")
-    var query: String
-
-    init(query: String) {
-        self.query = query
-    }
-}
-
-struct GetContactDetailsTool: Tool {
+struct GetContactDetailsTool: AgentTool {
     let dataSource: AgentToolDataSource
     var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
@@ -132,28 +109,30 @@ struct GetContactDetailsTool: Tool {
     var description: String {
         "Read one contact's full local details: role, email, phone, notes, tags, opportunities, and open follow-ups. This tool is read-only."
     }
+    var argumentsSchema: AgentSchema {
+        FindContactsTool.querySchema(
+            name: "ContactDetailsArguments",
+            description: "Contact name or company to look up."
+        )
+    }
 
     @concurrent
-    func call(arguments: ContactDetailsArguments) async throws -> String {
+    func call(arguments: ContactDetailsArguments, context: AgentToolContext) async throws -> AgentToolResult {
         let key = arguments.query.searchKey
         guard !key.isEmpty else {
             AppLog.tools.warning("getContactDetails rejected empty query")
-            return ToolText.emptyQuery
+            return AgentToolResult(modelContent: ToolText.emptyQuery)
         }
 
         let snapshot = try await dataSource.snapshot()
         AppLog.tools.debug("getContactDetails query=\(arguments.query, privacy: .private)")
-        return ToolText.contactDetails(snapshot, query: arguments.query, policy: outputPolicy)
+        return AgentToolResult(
+            modelContent: ToolText.contactDetails(snapshot, query: arguments.query, policy: outputPolicy)
+        )
     }
 }
 
-@Generable(description: "Arguments for summarizing the local CRM pipeline.")
-struct PipelineSummaryArguments: Sendable {
-    @Guide(description: "Optional focus: contacts, opportunities, or followUps.")
-    var focus: String?
-}
-
-struct GetPipelineSummaryTool: Tool {
+struct GetPipelineSummaryTool: AgentTool {
     let dataSource: AgentToolDataSource
     var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
@@ -161,16 +140,33 @@ struct GetPipelineSummaryTool: Tool {
     var description: String {
         "Summarize the local CRM: contact count, opportunities per stage, and open follow-ups with due dates. This tool is read-only."
     }
+    var argumentsSchema: AgentSchema {
+        .object(
+            AgentSchema.Object(
+                name: "PipelineSummaryArguments",
+                properties: [
+                    .init(
+                        "focus",
+                        description: "Optional focus: contacts, opportunities, or followUps.",
+                        schema: .nullable(.string()),
+                        isOptional: true
+                    )
+                ]
+            )
+        )
+    }
 
     @concurrent
-    func call(arguments: PipelineSummaryArguments) async throws -> String {
+    func call(arguments: PipelineSummaryArguments, context: AgentToolContext) async throws -> AgentToolResult {
         let snapshot = try await dataSource.snapshot()
         AppLog.tools.debug("getPipelineSummary focus=\(arguments.focus ?? "-", privacy: .public) contacts=\(snapshot.contacts.count, privacy: .public) opportunities=\(snapshot.opportunities.count, privacy: .public) followUps=\(snapshot.followUps.count, privacy: .public)")
-        return ToolText.pipelineSummary(snapshot, focus: arguments.focus, policy: outputPolicy)
+        return AgentToolResult(
+            modelContent: ToolText.pipelineSummary(snapshot, focus: arguments.focus, policy: outputPolicy)
+        )
     }
 }
 
-struct FindFollowUpsTool: Tool {
+struct FindFollowUpsTool: AgentTool {
     let dataSource: AgentToolDataSource
     var outputPolicy: AgentToolOutputPolicy = .appleFoundationModels
 
@@ -178,18 +174,52 @@ struct FindFollowUpsTool: Tool {
     var description: String {
         "Search existing local CRM follow-up tasks by combined fuzzy title, due date text, notes, state, contact, or opportunity. This tool is read-only."
     }
+    var argumentsSchema: AgentSchema {
+        FindContactsTool.querySchema(
+            name: "FindFollowUpsArguments",
+            description: "Short contact, title, date, or keyword."
+        )
+    }
 
     @concurrent
-    func call(arguments: FindFollowUpsArguments) async throws -> String {
+    func call(arguments: FindFollowUpsArguments, context: AgentToolContext) async throws -> AgentToolResult {
         let key = arguments.query.searchKey
         guard !key.isEmpty else {
             AppLog.tools.warning("findFollowUps rejected empty query")
-            return ToolText.emptyQuery
+            return AgentToolResult(modelContent: ToolText.emptyQuery)
         }
 
         let matches = try await dataSource.followUps(arguments.query, outputPolicy.resultLimit)
         AppLog.tools.debug("findFollowUps query=\(arguments.query, privacy: .private) returned=\(matches.count, privacy: .public)")
-        return ToolText.followUps(matches, policy: outputPolicy)
+        return AgentToolResult(modelContent: ToolText.followUps(matches, policy: outputPolicy))
+    }
+}
+
+extension FindContactsTool {
+    static func querySchema(name: String, description: String) -> AgentSchema {
+        .object(
+            AgentSchema.Object(
+                name: name,
+                properties: [
+                    .init("query", description: description, schema: .string())
+                ]
+            )
+        )
+    }
+}
+
+enum CRMToolCatalog {
+    static func make(
+        dataSource: AgentToolDataSource,
+        outputPolicy: AgentToolOutputPolicy
+    ) -> [AnyAgentTool] {
+        [
+            AnyAgentTool(FindContactsTool(dataSource: dataSource, outputPolicy: outputPolicy)),
+            AnyAgentTool(FindOpportunitiesTool(dataSource: dataSource, outputPolicy: outputPolicy)),
+            AnyAgentTool(FindFollowUpsTool(dataSource: dataSource, outputPolicy: outputPolicy)),
+            AnyAgentTool(GetContactDetailsTool(dataSource: dataSource, outputPolicy: outputPolicy)),
+            AnyAgentTool(GetPipelineSummaryTool(dataSource: dataSource, outputPolicy: outputPolicy))
+        ]
     }
 }
 
